@@ -26,6 +26,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
@@ -66,6 +68,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.webkit.ProfileStore
@@ -75,7 +78,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 
-private const val HOME_URL = "https://google.com/"
+private const val HOME_URL = "https://mbasic.facebook.com/"
 
 private data class SessionMeta(
     val id: String,
@@ -151,13 +154,11 @@ fun BroLikerApp() {
                 groups = sessions.map { it.group }.filter { it.isNotBlank() }.distinct().sorted(),
                 onDismiss = { showCreate = false },
             ) { name, group ->
-                if (WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
-                    val p = "profile_${UUID.randomUUID()}"
-                    val meta = SessionMeta(UUID.randomUUID().toString(), p, name, group, System.currentTimeMillis())
-                    sessions = sessions + meta
-                    store.save(sessions)
-                    selected = meta
-                }
+                val p = "profile_${UUID.randomUUID()}"
+                val meta = SessionMeta(UUID.randomUUID().toString(), p, name, group, System.currentTimeMillis())
+                sessions = sessions + meta
+                store.save(sessions)
+                selected = meta
                 showCreate = false
             }
         }
@@ -258,13 +259,11 @@ fun BroLikerApp() {
             groups = sessions.map { it.group }.filter { it.isNotBlank() }.distinct().sorted(),
             onDismiss = { showCreate = false },
         ) { name, group ->
-            if (WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
-                val p = "profile_${UUID.randomUUID()}"
-                val meta = SessionMeta(UUID.randomUUID().toString(), p, name, group, System.currentTimeMillis())
-                sessions = sessions + meta
-                store.save(sessions)
-                selected = meta
-            }
+            val p = "profile_${UUID.randomUUID()}"
+            val meta = SessionMeta(UUID.randomUUID().toString(), p, name, group, System.currentTimeMillis())
+            sessions = sessions + meta
+            store.save(sessions)
+            selected = meta
             showCreate = false
         }
     }
@@ -383,40 +382,72 @@ private fun BrowserScreen(session: SessionMeta, onBack: () -> Unit, onCreateAnot
     var canForward by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
     var currentUrl by remember { mutableStateOf(HOME_URL) }
+    var urlBarText by remember { mutableStateOf(HOME_URL) }
     var pageTitle by remember { mutableStateOf("Loading...") }
     var loadingProgress by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(true) }
     var errorMsg by remember { mutableStateOf<String?>(null) }
+
+    fun navigateTo(input: String) {
+        val url = when {
+            input.startsWith("http://") || input.startsWith("https://") -> input
+            input.contains(".") -> "https://$input"
+            else -> "https://www.google.com/search?q=${java.net.URLEncoder.encode(input, "UTF-8")}"
+        }
+        webViewRef?.loadUrl(url)
+        urlBarText = url
+    }
 
     Scaffold(
         contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
             Column {
                 TopAppBar(
-                    navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Close session") } },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Close session") }
+                    },
                     title = {
-                        Column {
-                            Text(pageTitle, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                            Text(currentUrl, style = MaterialTheme.typography.labelSmall, maxLines = 1)
-                        }
+                        OutlinedTextField(
+                            value = urlBarText,
+                            onValueChange = { urlBarText = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            placeholder = { Text("URL or search...", style = MaterialTheme.typography.bodySmall) },
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                            keyboardActions = KeyboardActions(onGo = { navigateTo(urlBarText) }),
+                            textStyle = MaterialTheme.typography.bodySmall,
+                        )
                     },
                     actions = {
-                        IconButton(enabled = canBack, onClick = { webViewRef?.goBack() }) { Icon(Icons.Default.ArrowBack, "Back") }
                         IconButton(onClick = { errorMsg = null; webViewRef?.reload() }) { Icon(Icons.Default.Refresh, "Reload") }
-                        IconButton(enabled = canForward, onClick = { webViewRef?.goForward() }) { Icon(Icons.Default.ArrowForward, "Forward") }
                         IconButton(onClick = { showMenu = true }) { Icon(Icons.Default.MoreVert, "More") }
                         DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
                             DropdownMenuItem(
-                                text = { Text("Home") },
+                                text = { Text("Back") },
+                                enabled = canBack,
+                                leadingIcon = { Icon(Icons.Default.ArrowBack, null) },
+                                onClick = { webViewRef?.goBack(); showMenu = false }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Forward") },
+                                enabled = canForward,
+                                leadingIcon = { Icon(Icons.Default.ArrowForward, null) },
+                                onClick = { webViewRef?.goForward(); showMenu = false }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Home (Facebook)") },
                                 leadingIcon = { Icon(Icons.Default.Home, null) },
-                                onClick = { webViewRef?.loadUrl(HOME_URL); showMenu = false }
+                                onClick = { navigateTo(HOME_URL); showMenu = false }
                             )
                             DropdownMenuItem(
                                 text = { Text("Create another session") },
                                 leadingIcon = { Icon(Icons.Default.Add, null) },
                                 onClick = { showMenu = false; onCreateAnother() }
                             )
-                            DropdownMenuItem(text = { Text("Close") }, onClick = { showMenu = false; onBack() })
+                            DropdownMenuItem(
+                                text = { Text("Close") },
+                                onClick = { showMenu = false; onBack() }
+                            )
                         }
                     },
                 )
@@ -450,7 +481,7 @@ private fun BrowserScreen(session: SessionMeta, onBack: () -> Unit, onCreateAnot
                             javaScriptCanOpenWindowsAutomatically = true
                             mediaPlaybackRequiresUserGesture = false
                             cacheMode = WebSettings.LOAD_DEFAULT
-                            userAgentString = "Mozilla/5.0 (Linux; Android 12; Samsung M21 Build/SP1A.210812.016) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36"
+                            userAgentString = "Mozilla/5.0 (Linux; Android 12; SM-M215F Build/SP1A.210812.016) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36"
                         }
                         CookieManager.getInstance().apply {
                             setAcceptCookie(true)
@@ -460,6 +491,7 @@ private fun BrowserScreen(session: SessionMeta, onBack: () -> Unit, onCreateAnot
                             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = false
                             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                                 currentUrl = url
+                                urlBarText = url
                                 isLoading = true
                                 errorMsg = null
                                 canBack = view.canGoBack()
@@ -467,6 +499,7 @@ private fun BrowserScreen(session: SessionMeta, onBack: () -> Unit, onCreateAnot
                             }
                             override fun onPageFinished(view: WebView, url: String) {
                                 currentUrl = url
+                                urlBarText = url
                                 isLoading = false
                                 canBack = view.canGoBack()
                                 canForward = view.canGoForward()
@@ -489,10 +522,10 @@ private fun BrowserScreen(session: SessionMeta, onBack: () -> Unit, onCreateAnot
                             }
                         }
                         if (WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
-    runCatching { WebViewCompat.setProfile(wv, session.profileName) }
-}
-wv.loadUrl(HOME_URL)
-webViewRef = wv
+                            runCatching { WebViewCompat.setProfile(wv, session.profileName) }
+                        }
+                        wv.loadUrl(HOME_URL)
+                        webViewRef = wv
                     }
                 },
                 update = { wv ->
