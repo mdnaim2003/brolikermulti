@@ -8,7 +8,6 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,13 +17,11 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -53,19 +50,16 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SmallTopAppBar
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -181,7 +175,7 @@ fun BroLikerApp() {
     Scaffold(
         contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
-            SmallTopAppBar(
+            TopAppBar(
                 title = {
                     Column {
                         Text("Bro Liker", fontWeight = FontWeight.Bold)
@@ -193,11 +187,21 @@ fun BroLikerApp() {
                     IconButton(onClick = { showGroup = true }) { Icon(Icons.Default.FilterList, "Groups") }
                     IconButton(onClick = { showMore = true }) { Icon(Icons.Default.MoreVert, "More") }
                     DropdownMenu(expanded = showMore, onDismissRequest = { showMore = false }) {
-                        DropdownMenuItem(text = { Text("Select all visible") }, leadingIcon = { Icon(Icons.Default.SelectAll, null) }, onClick = {
-                            selectedIds = if (allVisibleSelected) emptySet() else visible.map { it.id }.toSet(); showMore = false
-                        })
+                        DropdownMenuItem(
+                            text = { Text("Select all visible") },
+                            leadingIcon = { Icon(Icons.Default.SelectAll, null) },
+                            onClick = {
+                                selectedIds = if (allVisibleSelected) emptySet() else visible.map { it.id }.toSet()
+                                showMore = false
+                            }
+                        )
                         DropdownMenuItem(text = { Text("Clear selection") }, onClick = { selectedIds = emptySet(); showMore = false })
-                        DropdownMenuItem(text = { Text("Bulk move to group") }, leadingIcon = { Icon(Icons.Default.SwapVert, null) }, enabled = selectedIds.isNotEmpty(), onClick = { showBulkGroup = true; showMore = false })
+                        DropdownMenuItem(
+                            text = { Text("Bulk move to group") },
+                            leadingIcon = { Icon(Icons.Default.SwapVert, null) },
+                            enabled = selectedIds.isNotEmpty(),
+                            onClick = { showBulkGroup = true; showMore = false }
+                        )
                     }
                 }
             )
@@ -330,24 +334,41 @@ private fun CreateSessionDialog(groups: List<String>, onDismiss: () -> Unit, onC
 @Composable
 private fun RenameDialog(current: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
     var value by remember { mutableStateOf(current) }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("Rename session") }, text = { OutlinedTextField(value, { value = it }, singleLine = true, label = { Text("Name") }) }, confirmButton = { Button(enabled = value.isNotBlank(), onClick = { onSave(value.trim()) }) { Text("Save") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Rename session") },
+        text = { OutlinedTextField(value, { value = it }, singleLine = true, label = { Text("Name") }) },
+        confirmButton = { Button(enabled = value.isNotBlank(), onClick = { onSave(value.trim()) }) { Text("Save") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
 }
 
 @Composable
 private fun GroupManagerDialog(groups: List<String>, onDismiss: () -> Unit, onFilter: (String) -> Unit) {
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("Groups") }, text = {
-        Column {
-            TextButton(onClick = { onFilter("All") }) { Text("All sessions") }
-            TextButton(onClick = { onFilter("Ungrouped") }) { Text("Ungrouped") }
-            groups.forEach { g -> TextButton(onClick = { onFilter(g) }) { Text(g) } }
-        }
-    }, confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } })
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Groups") },
+        text = {
+            Column {
+                TextButton(onClick = { onFilter("All") }) { Text("All sessions") }
+                TextButton(onClick = { onFilter("Ungrouped") }) { Text("Ungrouped") }
+                groups.forEach { g -> TextButton(onClick = { onFilter(g) }) { Text(g) } }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } }
+    )
 }
 
 @Composable
 private fun BulkGroupDialog(groups: List<String>, onDismiss: () -> Unit, onApply: (String) -> Unit) {
     var group by remember { mutableStateOf("") }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("Move selected sessions") }, text = { OutlinedTextField(group, { group = it }, label = { Text("Group name") }, singleLine = true) }, confirmButton = { Button(enabled = group.isNotBlank(), onClick = { onApply(group.trim()) }) { Text("Move") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Move selected sessions") },
+        text = { OutlinedTextField(group, { group = it }, label = { Text("Group name") }, singleLine = true) },
+        confirmButton = { Button(enabled = group.isNotBlank(), onClick = { onApply(group.trim()) }) { Text("Move") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
 }
 
 @SuppressLint("SetJavaScriptEnabled")
@@ -362,17 +383,30 @@ private fun BrowserScreen(session: SessionMeta, onBack: () -> Unit, onCreateAnot
     Scaffold(
         contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
-            SmallTopAppBar(
+            TopAppBar(
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Close session") } },
-                title = { Column { Text(session.name, fontWeight = FontWeight.SemiBold); Text(if (session.group.isBlank()) "Ungrouped" else session.group, style = MaterialTheme.typography.labelSmall) } },
+                title = {
+                    Column {
+                        Text(session.name, fontWeight = FontWeight.SemiBold)
+                        Text(if (session.group.isBlank()) "Ungrouped" else session.group, style = MaterialTheme.typography.labelSmall)
+                    }
+                },
                 actions = {
                     IconButton(enabled = canBack, onClick = { webViewRef?.goBack() }) { Icon(Icons.Default.ArrowBack, "Back") }
                     IconButton(onClick = { webViewRef?.reload() }) { Icon(Icons.Default.Refresh, "Reload") }
                     IconButton(enabled = canForward, onClick = { webViewRef?.goForward() }) { Icon(Icons.Default.ArrowForward, "Forward") }
                     IconButton(onClick = { showMenu = true }) { Icon(Icons.Default.MoreVert, "More") }
                     DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-                        DropdownMenuItem(text = { Text("Home") }, leadingIcon = { Icon(Icons.Default.Home, null) }, onClick = { webViewRef?.loadUrl(HOME_URL); showMenu = false })
-                        DropdownMenuItem(text = { Text("Create another session") }, leadingIcon = { Icon(Icons.Default.Add, null) }, onClick = { showMenu = false; onCreateAnother() })
+                        DropdownMenuItem(
+                            text = { Text("Home") },
+                            leadingIcon = { Icon(Icons.Default.Home, null) },
+                            onClick = { webViewRef?.loadUrl(HOME_URL); showMenu = false }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Create another session") },
+                            leadingIcon = { Icon(Icons.Default.Add, null) },
+                            onClick = { showMenu = false; onCreateAnother() }
+                        )
                         DropdownMenuItem(text = { Text("Close") }, onClick = { showMenu = false; onBack() })
                     }
                 },
