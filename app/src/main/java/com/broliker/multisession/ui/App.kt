@@ -75,7 +75,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 
-private const val HOME_URL = "https://m.facebook.com/"
+private const val HOME_URL = "https://google.com/"
 
 private data class SessionMeta(
     val id: String,
@@ -489,10 +489,10 @@ private fun BrowserScreen(session: SessionMeta, onBack: () -> Unit, onCreateAnot
                             }
                         }
                         if (WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
-                            WebViewCompat.setProfile(wv, session.profileName)
-                        }
-                        wv.loadUrl(HOME_URL)
-                        webViewRef = wv
+    runCatching { WebViewCompat.setProfile(wv, session.profileName) }
+}
+wv.loadUrl(HOME_URL)
+webViewRef = wv
                     }
                 },
                 update = { wv ->
