@@ -7,6 +7,7 @@ import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.background
@@ -64,7 +65,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -432,20 +432,31 @@ private fun BrowserScreen(session: SessionMeta, onBack: () -> Unit, onCreateAnot
         Box(Modifier.fillMaxSize().padding(pad)) {
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
-                factory = { context ->
-                    WebView(context).apply {
-                        settings.javaScriptEnabled = true
-                        settings.domStorageEnabled = true
-                        settings.loadsImagesAutomatically = true
-                        settings.useWideViewPort = true
-                        settings.loadWithOverviewMode = false
-                        settings.builtInZoomControls = false
-                        settings.displayZoomControls = false
-                        settings.setSupportZoom(false)
-                        settings.userAgentString = "Mozilla/5.0 (Linux; Android 13; Samsung M21) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
-                        CookieManager.getInstance().setAcceptCookie(true)
-                        CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-                        webViewClient = object : WebViewClient() {
+                factory = { ctx ->
+                    WebView(ctx).also { wv ->
+                        wv.settings.apply {
+                            javaScriptEnabled = true
+                            domStorageEnabled = true
+                            databaseEnabled = true
+                            loadsImagesAutomatically = true
+                            useWideViewPort = true
+                            loadWithOverviewMode = true
+                            setSupportZoom(true)
+                            builtInZoomControls = true
+                            displayZoomControls = false
+                            allowFileAccess = true
+                            allowContentAccess = true
+                            mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                            javaScriptCanOpenWindowsAutomatically = true
+                            mediaPlaybackRequiresUserGesture = false
+                            cacheMode = WebSettings.LOAD_DEFAULT
+                            userAgentString = "Mozilla/5.0 (Linux; Android 12; Samsung M21 Build/SP1A.210812.016) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36"
+                        }
+                        CookieManager.getInstance().apply {
+                            setAcceptCookie(true)
+                            setAcceptThirdPartyCookies(wv, true)
+                        }
+                        wv.webViewClient = object : WebViewClient() {
                             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = false
                             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                                 currentUrl = url
@@ -459,6 +470,7 @@ private fun BrowserScreen(session: SessionMeta, onBack: () -> Unit, onCreateAnot
                                 isLoading = false
                                 canBack = view.canGoBack()
                                 canForward = view.canGoForward()
+                                CookieManager.getInstance().flush()
                             }
                             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
                                 if (request.isForMainFrame) {
@@ -467,7 +479,7 @@ private fun BrowserScreen(session: SessionMeta, onBack: () -> Unit, onCreateAnot
                                 }
                             }
                         }
-                        webChromeClient = object : WebChromeClient() {
+                        wv.webChromeClient = object : WebChromeClient() {
                             override fun onProgressChanged(view: WebView, newProgress: Int) {
                                 loadingProgress = newProgress
                                 isLoading = newProgress < 100
@@ -477,16 +489,16 @@ private fun BrowserScreen(session: SessionMeta, onBack: () -> Unit, onCreateAnot
                             }
                         }
                         if (WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
-                            WebViewCompat.setProfile(this, session.profileName)
+                            WebViewCompat.setProfile(wv, session.profileName)
                         }
-                        loadUrl(HOME_URL)
-                        webViewRef = this
+                        wv.loadUrl(HOME_URL)
+                        webViewRef = wv
                     }
                 },
-                update = {
-                    webViewRef = it
-                    canBack = it.canGoBack()
-                    canForward = it.canGoForward()
+                update = { wv ->
+                    webViewRef = wv
+                    canBack = wv.canGoBack()
+                    canForward = wv.canGoForward()
                 },
                 onRelease = { it.stopLoading(); it.destroy() },
             )
@@ -500,11 +512,11 @@ private fun BrowserScreen(session: SessionMeta, onBack: () -> Unit, onCreateAnot
                     verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Text("Failed to load page", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onErrorContainer, fontWeight = FontWeight.Bold)
+                    Text("Failed to load", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(8.dp))
-                    Text(err, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer)
+                    Text(err, style = MaterialTheme.typography.bodySmall)
                     Spacer(Modifier.height(8.dp))
-                    Text(currentUrl, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onErrorContainer)
+                    Text(currentUrl, style = MaterialTheme.typography.labelSmall)
                     Spacer(Modifier.height(16.dp))
                     Button(onClick = { errorMsg = null; webViewRef?.reload() }) { Text("Retry") }
                 }
