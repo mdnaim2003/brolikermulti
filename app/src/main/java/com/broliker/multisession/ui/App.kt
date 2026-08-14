@@ -4,7 +4,6 @@ import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Message
@@ -62,15 +61,14 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.Divider
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -93,13 +91,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.platform.LocalContext
 import androidx.webkit.ProfileStore
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
@@ -116,7 +114,7 @@ import java.util.UUID
 private const val HOME_URL = "https://m.facebook.com/"
 private const val PAGE_SIZE = 50
 
-// ─── Data ───────────────────────────────────────────────────────────────────
+// ─── Data ────────────────────────────────────────────────────────────────────
 
 private data class SessionMeta(
     val id: String,
@@ -129,7 +127,7 @@ private data class SessionMeta(
     val serialNumber: Int = 0,
 )
 
-// ─── Store ───────────────────────────────────────────────────────────────────
+// ─── Store ────────────────────────────────────────────────────────────────────
 
 private class SessionStore(private val context: Context) {
     private val prefs = context.getSharedPreferences("bro_sessions", Context.MODE_PRIVATE)
@@ -172,11 +170,8 @@ private class SessionStore(private val context: Context) {
         prefs.edit().putString("items", arr.toString()).apply()
     }
 
-    fun nextSerialNumber(sessions: List<SessionMeta>): Int {
-        return (sessions.maxOfOrNull { it.serialNumber } ?: 0) + 1
-    }
-
-    // ── Export ──────────────────────────────────────────────────────────────
+    fun nextSerialNumber(sessions: List<SessionMeta>): Int =
+        (sessions.maxOfOrNull { it.serialNumber } ?: 0) + 1
 
     fun exportToJson(sessions: List<SessionMeta>): String {
         val root = JSONObject()
@@ -185,7 +180,7 @@ private class SessionStore(private val context: Context) {
         root.put("exported_at", System.currentTimeMillis())
         val arr = JSONArray()
         sessions.forEach { s ->
-            val obj = JSONObject().apply {
+            arr.put(JSONObject().apply {
                 put("id", s.id)
                 put("profileName", s.profileName)
                 put("name", s.name)
@@ -194,7 +189,6 @@ private class SessionStore(private val context: Context) {
                 put("lastOpenedAt", s.lastOpenedAt)
                 put("archived", s.archived)
                 put("serialNumber", s.serialNumber)
-                // collect cookies from both facebook.com domains
                 val cookieStr = buildString {
                     listOf(
                         "https://www.facebook.com",
@@ -215,8 +209,7 @@ private class SessionStore(private val context: Context) {
                     }
                 }.trim().trimEnd(';').trim()
                 put("cookies", cookieStr)
-            }
-            arr.put(obj)
+            })
         }
         root.put("sessions", arr)
         return root.toString(2)
@@ -268,11 +261,8 @@ private class SessionStore(private val context: Context) {
                 pairs.forEach { pair ->
                     domains.forEach { domain ->
                         runCatching {
-                            if (cm != null) {
-                                cm.setCookie(domain, pair)
-                            } else {
-                                CookieManager.getInstance().setCookie(domain, pair)
-                            }
+                            if (cm != null) cm.setCookie(domain, pair)
+                            else CookieManager.getInstance().setCookie(domain, pair)
                         }
                     }
                 }
@@ -282,25 +272,17 @@ private class SessionStore(private val context: Context) {
     }
 }
 
-// ─── Cookie helpers ──────────────────────────────────────────────────────────
+// ─── Cookie helpers ───────────────────────────────────────────────────────────
 
 private fun getCookiesAsJson(
     session: SessionMeta,
     multiProfileSupported: Boolean,
 ): String {
-    val domains = listOf(
-        "https://www.facebook.com",
-        "https://m.facebook.com",
-        "https://facebook.com",
-    )
     val merged = mutableMapOf<String, String>()
-    domains.forEach { domain ->
+    listOf("https://www.facebook.com", "https://m.facebook.com", "https://facebook.com").forEach { domain ->
         val raw = runCatching {
             if (multiProfileSupported) {
-                ProfileStore.getInstance()
-                    .getProfile(session.profileName)
-                    ?.cookieManager
-                    ?.getCookie(domain)
+                ProfileStore.getInstance().getProfile(session.profileName)?.cookieManager?.getCookie(domain)
             } else {
                 CookieManager.getInstance().getCookie(domain)
             }
@@ -308,11 +290,7 @@ private fun getCookiesAsJson(
         if (!raw.isNullOrBlank()) {
             raw.split(";").map { it.trim() }.filter { it.isNotBlank() }.forEach { pair ->
                 val idx = pair.indexOf('=')
-                if (idx > 0) {
-                    val k = pair.substring(0, idx).trim()
-                    val v = pair.substring(idx + 1).trim()
-                    merged[k] = v
-                }
+                if (idx > 0) merged[pair.substring(0, idx).trim()] = pair.substring(idx + 1).trim()
             }
         }
     }
@@ -354,11 +332,11 @@ private fun copyCookieInfo(
     Toast.makeText(context, "Cookie info copied", Toast.LENGTH_SHORT).show()
 }
 
-// ─── Screens enum ────────────────────────────────────────────────────────────
+// ─── Screens ──────────────────────────────────────────────────────────────────
 
 private enum class Screen { HOME, SETTINGS }
 
-// ─── Root Composable ─────────────────────────────────────────────────────────
+// ─── Root ─────────────────────────────────────────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -370,7 +348,6 @@ fun BroLikerApp() {
     var showCreate by remember { mutableStateOf(false) }
     var currentScreen by remember { mutableStateOf(Screen.HOME) }
 
-    // Browser screen takes over full composable
     if (selected != null) {
         BrowserScreen(
             session = selected!!,
@@ -448,7 +425,7 @@ fun BroLikerApp() {
     }
 }
 
-// ─── Home Screen ─────────────────────────────────────────────────────────────
+// ─── Home Screen ──────────────────────────────────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -507,25 +484,16 @@ private fun HomeScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = onCreateNew) {
-                        Icon(Icons.Default.Add, "New session")
-                    }
-                    IconButton(onClick = { showGroupManager = true }) {
-                        Icon(Icons.Default.Folder, "Groups")
-                    }
-                    IconButton(onClick = onGoSettings) {
-                        Icon(Icons.Default.Settings, "Settings")
-                    }
-                    IconButton(onClick = { showMore = true }) {
-                        Icon(Icons.Default.MoreVert, "More")
-                    }
+                    IconButton(onClick = onCreateNew) { Icon(Icons.Default.Add, "New session") }
+                    IconButton(onClick = { showGroupManager = true }) { Icon(Icons.Default.Folder, "Groups") }
+                    IconButton(onClick = onGoSettings) { Icon(Icons.Default.Settings, "Settings") }
+                    IconButton(onClick = { showMore = true }) { Icon(Icons.Default.MoreVert, "More") }
                     DropdownMenu(expanded = showMore, onDismissRequest = { showMore = false }) {
                         DropdownMenuItem(
                             text = { Text(if (allPageSelected) "Deselect all" else "Select all") },
                             leadingIcon = { Icon(Icons.Default.SelectAll, null) },
                             onClick = {
-                                selectedIds = if (allPageSelected) emptySet()
-                                else pageItems.map { it.id }.toSet()
+                                selectedIds = if (allPageSelected) emptySet() else pageItems.map { it.id }.toSet()
                                 showMore = false
                             },
                         )
@@ -552,7 +520,6 @@ private fun HomeScreen(
         ) {
             Spacer(Modifier.height(8.dp))
 
-            // Search bar
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it; currentPage = 0 },
@@ -562,9 +529,7 @@ private fun HomeScreen(
                 leadingIcon = { Icon(Icons.Default.Search, null) },
                 trailingIcon = {
                     if (query.isNotBlank()) {
-                        IconButton(onClick = { query = "" }) {
-                            Icon(Icons.Default.Close, "Clear")
-                        }
+                        IconButton(onClick = { query = "" }) { Icon(Icons.Default.Close, "Clear") }
                     }
                 },
                 shape = RoundedCornerShape(12.dp),
@@ -572,7 +537,6 @@ private fun HomeScreen(
 
             Spacer(Modifier.height(8.dp))
 
-            // Group chips
             LazyRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxWidth(),
@@ -593,8 +557,7 @@ private fun HomeScreen(
                         ) {
                             if (group != "All" && group != "Ungrouped") {
                                 Icon(
-                                    Icons.Default.FolderOpen,
-                                    null,
+                                    Icons.Default.FolderOpen, null,
                                     tint = if (isSelected) MaterialTheme.colorScheme.onPrimary
                                     else MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.size(14.dp),
@@ -615,7 +578,6 @@ private fun HomeScreen(
 
             Spacer(Modifier.height(8.dp))
 
-            // Selection info bar
             if (selectedIds.isNotEmpty()) {
                 Surface(
                     color = MaterialTheme.colorScheme.primaryContainer,
@@ -632,18 +594,13 @@ private fun HomeScreen(
                             fontWeight = FontWeight.Medium,
                             modifier = Modifier.weight(1f),
                         )
-                        TextButton(onClick = { showBulkGroup = true }) {
-                            Text("Move to Group")
-                        }
-                        TextButton(onClick = { selectedIds = emptySet() }) {
-                            Text("Clear")
-                        }
+                        TextButton(onClick = { showBulkGroup = true }) { Text("Move to Group") }
+                        TextButton(onClick = { selectedIds = emptySet() }) { Text("Clear") }
                     }
                 }
                 Spacer(Modifier.height(4.dp))
             }
 
-            // Session list
             LazyColumn(
                 verticalArrangement = Arrangement.spacedBy(6.dp),
                 modifier = Modifier.weight(1f),
@@ -651,7 +608,9 @@ private fun HomeScreen(
                 if (pageItems.isEmpty()) {
                     item {
                         Box(
-                            Modifier.fillMaxWidth().padding(vertical = 48.dp),
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 48.dp),
                             contentAlignment = Alignment.Center,
                         ) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -686,7 +645,6 @@ private fun HomeScreen(
                 }
             }
 
-            // Pagination
             if (totalPages > 1) {
                 Spacer(Modifier.height(4.dp))
                 Row(
@@ -701,20 +659,10 @@ private fun HomeScreen(
                         enabled = currentPage > 0,
                         modifier = Modifier.height(36.dp),
                     ) { Text("← Prev") }
-
                     Spacer(Modifier.width(12.dp))
-                    Text(
-                        "Page ${currentPage + 1} / $totalPages",
-                        fontWeight = FontWeight.Medium,
-                        fontSize = 13.sp,
-                    )
-                    Text(
-                        "  (${filtered.size} total)",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    Text("Page ${currentPage + 1} / $totalPages", fontWeight = FontWeight.Medium, fontSize = 13.sp)
+                    Text("  (${filtered.size} total)", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.width(12.dp))
-
                     OutlinedButton(
                         onClick = { if (currentPage < totalPages - 1) currentPage++ },
                         enabled = currentPage < totalPages - 1,
@@ -728,7 +676,6 @@ private fun HomeScreen(
         }
     }
 
-    // Rename dialog
     showRename?.let { current ->
         RenameDialog(current = current.name, onDismiss = { showRename = null }) { newName ->
             val updated = sessions.map { if (it.id == current.id) it.copy(name = newName) else it }
@@ -737,7 +684,6 @@ private fun HomeScreen(
         }
     }
 
-    // Bulk group dialog
     if (showBulkGroup) {
         BulkGroupDialog(
             groups = sessions.map { it.group }.filter { it.isNotBlank() }.distinct().sorted(),
@@ -750,13 +696,13 @@ private fun HomeScreen(
         }
     }
 
-    // Group manager
     if (showGroupManager) {
         GroupManagerDialog(
             groups = sessions.map { it.group }.filter { it.isNotBlank() }.distinct().sorted(),
             currentFilter = filterGroup,
             sessionCounts = buildMap {
-                sessions.filter { !it.archived }.groupBy { it.group.ifBlank { "__ungrouped__" } }
+                sessions.filter { !it.archived }
+                    .groupBy { it.group.ifBlank { "__ungrouped__" } }
                     .forEach { (k, v) -> put(k, v.size) }
             },
             allCount = sessions.count { !it.archived },
@@ -803,7 +749,6 @@ private fun SessionCard(
         ) {
             Checkbox(checked = isSelected, onCheckedChange = { onSelect() })
 
-            // Avatar circle
             Box(
                 Modifier
                     .size(38.dp)
@@ -838,7 +783,6 @@ private fun SessionCard(
                 )
             }
 
-            // Open button
             FilledTonalButton(
                 onClick = onOpen,
                 modifier = Modifier.height(32.dp),
@@ -851,17 +795,13 @@ private fun SessionCard(
                 Icon(Icons.Default.Edit, null, modifier = Modifier.size(18.dp))
             }
             IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
-                Icon(
-                    Icons.Default.Delete, null,
-                    tint = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.size(18.dp),
-                )
+                Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
             }
         }
     }
 }
 
-// ─── Settings Screen ─────────────────────────────────────────────────────────
+// ─── Settings Screen ──────────────────────────────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -876,13 +816,11 @@ private fun SettingsScreen(
     var exportStatus by remember { mutableStateOf("") }
     var showImportConfirm by remember { mutableStateOf<String?>(null) }
 
-    // Export launcher — creates a file via SAF
     val exportLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/json")
-    ) { uri ->
+    ) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
         runCatching {
-            // flush all cookies first
             if (WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
                 sessions.forEach { s ->
                     runCatching {
@@ -898,10 +836,9 @@ private fun SettingsScreen(
         }.onFailure { exportStatus = "❌ Export failed: ${it.message}" }
     }
 
-    // Import launcher — picks a JSON file
     val importLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
-    ) { uri ->
+    ) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
         runCatching {
             val json = context.contentResolver.openInputStream(uri)?.use { stream ->
@@ -917,9 +854,7 @@ private fun SettingsScreen(
             TopAppBar(
                 title = { Text("Settings", fontWeight = FontWeight.Bold) },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.Default.ArrowBack, "Back")
-                    }
+                    IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") }
                 },
             )
         },
@@ -948,10 +883,7 @@ private fun SettingsScreen(
             }
 
             item {
-                Card(
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
+                Card(shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("Export Sessions", fontWeight = FontWeight.SemiBold)
                         Text(
@@ -961,14 +893,11 @@ private fun SettingsScreen(
                         )
                         Button(
                             onClick = {
-                                val timestamp = SimpleDateFormat("yyyyMMdd_HHmm", Locale.getDefault())
-                                    .format(Date())
-                                exportLauncher.launch("broliker_backup_$timestamp.json")
+                                val ts = SimpleDateFormat("yyyyMMdd_HHmm", Locale.getDefault()).format(Date())
+                                exportLauncher.launch("broliker_backup_$ts.json")
                             },
                             modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Text("📤  Export to File")
-                        }
+                        ) { Text("📤  Export to File") }
                         if (exportStatus.isNotBlank()) {
                             Text(exportStatus, fontSize = 12.sp)
                         }
@@ -977,10 +906,7 @@ private fun SettingsScreen(
             }
 
             item {
-                Card(
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
+                Card(shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("Import Sessions", fontWeight = FontWeight.SemiBold)
                         Text(
@@ -991,9 +917,7 @@ private fun SettingsScreen(
                         OutlinedButton(
                             onClick = { importLauncher.launch(arrayOf("application/json", "*/*")) },
                             modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Text("📥  Import from File")
-                        }
+                        ) { Text("📥  Import from File") }
                         if (importStatus.isNotBlank()) {
                             Text(importStatus, fontSize = 12.sp)
                         }
@@ -1002,7 +926,7 @@ private fun SettingsScreen(
             }
 
             item {
-                Divider()
+                HorizontalDivider()
                 Spacer(Modifier.height(4.dp))
                 Text(
                     "ℹ️  Cookie restore works best when done on the same device shortly after export.",
@@ -1014,12 +938,8 @@ private fun SettingsScreen(
         }
     }
 
-    // Import confirm dialog
     showImportConfirm?.let { json ->
-        val count = runCatching {
-            JSONObject(json).getJSONArray("sessions").length()
-        }.getOrDefault(0)
-
+        val count = runCatching { JSONObject(json).getJSONArray("sessions").length() }.getOrDefault(0)
         AlertDialog(
             onDismissRequest = { showImportConfirm = null },
             title = { Text("Import $count sessions?") },
@@ -1033,7 +953,6 @@ private fun SettingsScreen(
                 Button(onClick = {
                     runCatching {
                         val imported = store.importFromJson(json)
-                        // Merge: skip if same profileName already exists
                         val existingProfiles = sessions.map { it.profileName }.toSet()
                         val toAdd = imported.filter { it.profileName !in existingProfiles }
                         val merged = sessions + toAdd
@@ -1062,7 +981,6 @@ private fun CreateSessionDialog(
 ) {
     var name by remember { mutableStateOf("My Session $nextSerial") }
     var group by remember { mutableStateOf("") }
-    var showGroupSuggestions by remember { mutableStateOf(false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1076,19 +994,21 @@ private fun CreateSessionDialog(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 OutlinedTextField(
-                    group, { group = it; showGroupSuggestions = groups.isNotEmpty() },
+                    group, { group = it },
                     label = { Text("Group (optional)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                if (showGroupSuggestions && groups.isNotEmpty()) {
+                if (groups.isNotEmpty()) {
                     Text("Existing groups:", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         items(groups) { g ->
                             Surface(
                                 color = MaterialTheme.colorScheme.secondaryContainer,
                                 shape = RoundedCornerShape(16.dp),
-                                modifier = Modifier.clip(RoundedCornerShape(16.dp)).clickable { group = g },
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .clickable { group = g },
                             ) {
                                 Text(g, Modifier.padding(horizontal = 10.dp, vertical = 4.dp), fontSize = 12.sp)
                             }
@@ -1107,9 +1027,7 @@ private fun CreateSessionDialog(
                 Text("Create & Open")
             }
         },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
 
@@ -1132,9 +1050,7 @@ private fun RenameDialog(
             )
         },
         confirmButton = {
-            Button(enabled = value.isNotBlank(), onClick = { onSave(value.trim()) }) {
-                Text("Save")
-            }
+            Button(enabled = value.isNotBlank(), onClick = { onSave(value.trim()) }) { Text("Save") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
@@ -1166,7 +1082,9 @@ private fun BulkGroupDialog(
                                 color = if (group == g) MaterialTheme.colorScheme.primaryContainer
                                 else MaterialTheme.colorScheme.surfaceVariant,
                                 shape = RoundedCornerShape(16.dp),
-                                modifier = Modifier.clip(RoundedCornerShape(16.dp)).clickable { group = g },
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .clickable { group = g },
                             ) {
                                 Row(
                                     Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
@@ -1185,9 +1103,7 @@ private fun BulkGroupDialog(
             }
         },
         confirmButton = {
-            Button(enabled = group.isNotBlank(), onClick = { onApply(group.trim()) }) {
-                Text("Move")
-            }
+            Button(enabled = group.isNotBlank(), onClick = { onApply(group.trim()) }) { Text("Move") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
@@ -1212,7 +1128,6 @@ private fun GroupManagerDialog(
         title = { Text("Manage Groups") },
         text = {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                // All
                 item {
                     GroupRow(
                         name = "All",
@@ -1223,12 +1138,10 @@ private fun GroupManagerDialog(
                         onDelete = null,
                     )
                 }
-                // Ungrouped
                 item {
-                    val cnt = sessionCounts["__ungrouped__"] ?: 0
                     GroupRow(
                         name = "Ungrouped",
-                        count = cnt,
+                        count = sessionCounts["__ungrouped__"] ?: 0,
                         isActive = currentFilter == "Ungrouped",
                         onClick = { onFilter("Ungrouped") },
                         onRename = null,
@@ -1236,14 +1149,11 @@ private fun GroupManagerDialog(
                     )
                 }
                 if (groups.isNotEmpty()) {
-                    item { Divider(Modifier.padding(vertical = 4.dp)) }
+                    item { HorizontalDivider(Modifier.padding(vertical = 4.dp)) }
                 }
                 items(groups) { group ->
                     if (renamingGroup == group) {
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             OutlinedTextField(
                                 renameValue, { renameValue = it },
                                 singleLine = true,
@@ -1252,9 +1162,7 @@ private fun GroupManagerDialog(
                             )
                             Spacer(Modifier.width(4.dp))
                             IconButton(onClick = {
-                                if (renameValue.isNotBlank()) {
-                                    onRenameGroup(group, renameValue.trim())
-                                }
+                                if (renameValue.isNotBlank()) onRenameGroup(group, renameValue.trim())
                                 renamingGroup = null
                             }) {
                                 Icon(Icons.Default.Check, "Save", tint = MaterialTheme.colorScheme.primary)
@@ -1269,10 +1177,7 @@ private fun GroupManagerDialog(
                             count = sessionCounts[group] ?: 0,
                             isActive = currentFilter == group,
                             onClick = { onFilter(group) },
-                            onRename = {
-                                renamingGroup = group
-                                renameValue = group
-                            },
+                            onRename = { renamingGroup = group; renameValue = group },
                             onDelete = { onDeleteGroup(group) },
                         )
                     }
@@ -1295,8 +1200,7 @@ private fun GroupRow(
     onDelete: (() -> Unit)?,
 ) {
     Surface(
-        color = if (isActive) MaterialTheme.colorScheme.primaryContainer
-        else Color.Transparent,
+        color = if (isActive) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
         shape = RoundedCornerShape(8.dp),
         modifier = Modifier
             .fillMaxWidth()
@@ -1311,16 +1215,15 @@ private fun GroupRow(
                 if (name == "All" || name == "Ungrouped") Icons.Default.Home else Icons.Default.FolderOpen,
                 null,
                 modifier = Modifier.size(18.dp),
-                tint = if (isActive) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.onSurfaceVariant,
+                tint = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.width(8.dp))
-            Text(name, Modifier.weight(1f), fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal)
             Text(
-                "$count",
-                fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                name,
+                Modifier.weight(1f),
+                fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal,
             )
+            Text("$count", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (onRename != null) {
                 IconButton(onClick = onRename, modifier = Modifier.size(32.dp)) {
                     Icon(Icons.Default.Edit, null, modifier = Modifier.size(16.dp))
@@ -1328,11 +1231,7 @@ private fun GroupRow(
             }
             if (onDelete != null) {
                 IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
-                    Icon(
-                        Icons.Default.Delete, null,
-                        tint = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.size(16.dp),
-                    )
+                    Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(16.dp))
                 }
             }
         }
@@ -1412,9 +1311,7 @@ private fun BrowserScreen(
 
     fun flushCookies() {
         if (multiProfileSupported) {
-            runCatching {
-                profileStore().getProfile(session.profileName)?.cookieManager?.flush()
-            }
+            runCatching { profileStore().getProfile(session.profileName)?.cookieManager?.flush() }
         } else {
             CookieManager.getInstance().flush()
         }
@@ -1458,7 +1355,9 @@ private fun BrowserScreen(
             configureProfile(child)
             child.webViewClient = makeClient(child)
             child.webChromeClient = makeChromeClient(child)
-            child.layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            child.layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+            )
             activeWebView?.visibility = android.view.View.GONE
             root.addView(child); activeWebView = child
             val transport = resultMsg.obj as? WebView.WebViewTransport ?: return false
@@ -1544,7 +1443,7 @@ private fun BrowserScreen(
                                 leadingIcon = { Icon(Icons.Default.Add, null) },
                                 onClick = { showMenu = false; onCreateAnother() },
                             )
-                            Divider()
+                            HorizontalDivider()
                             DropdownMenuItem(
                                 text = { Text("Copy Session Info") },
                                 leadingIcon = { Icon(Icons.Default.ContentCopy, null) },
@@ -1561,7 +1460,7 @@ private fun BrowserScreen(
                                     copyCookieInfo(context, session, multiProfileSupported)
                                 },
                             )
-                            Divider()
+                            HorizontalDivider()
                             DropdownMenuItem(
                                 text = { Text("Close") },
                                 onClick = { showMenu = false; flushCookies(); onBack() },
@@ -1603,7 +1502,12 @@ private fun BrowserScreen(
                 onRelease = { root ->
                     for (i in root.childCount - 1 downTo 0) {
                         (root.getChildAt(i) as? WebView)?.let { web ->
-                            runCatching { web.stopLoading(); web.loadUrl("about:blank"); web.removeAllViews(); web.destroy() }
+                            runCatching {
+                                web.stopLoading()
+                                web.loadUrl("about:blank")
+                                web.removeAllViews()
+                                web.destroy()
+                            }
                         }
                     }
                     root.removeAllViews(); activeWebView = null; rootRef = null
