@@ -12,8 +12,28 @@ android {
         applicationId = "com.broliker.multisession"
         minSdk = 24
         targetSdk = 35
-        versionCode = 5
+        // For GitHub Actions release builds, VERSION_CODE is supplied by the workflow.
+        // Local/debug builds continue to use this safe fallback.
+        versionCode = (System.getenv("VERSION_CODE") ?: "5").toInt()
         versionName = "5.0.0"
+    }
+
+    signingConfigs {
+        create("release") {
+            val keystoreFile = rootProject.file("release-key.jks")
+            storeFile = keystoreFile
+            storePassword = System.getenv("KEYSTORE_PASSWORD")
+            keyAlias = System.getenv("KEY_ALIAS")
+            keyPassword = System.getenv("KEY_PASSWORD")
+        }
+    }
+
+    buildTypes {
+        release {
+            signingConfig = signingConfigs.getByName("release")
+            isMinifyEnabled = true
+            isShrinkResources = true
+        }
     }
 
     buildFeatures {

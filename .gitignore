@@ -1,0 +1,9 @@
+# Local/release signing material
+release-key.jks
+keystore-base64.txt
+*.jks
+
+# Gradle/build outputs
+.gradle/
+build/
+app/build/
