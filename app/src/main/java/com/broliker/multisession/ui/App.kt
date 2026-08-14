@@ -2,8 +2,10 @@ package com.broliker.multisession.ui
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Bitmap
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -47,6 +49,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -55,19 +58,19 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.webkit.ProfileStore
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
@@ -323,7 +326,7 @@ private fun CreateSessionDialog(groups: List<String>, onDismiss: () -> Unit, onC
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(name, { name = it }, label = { Text("Session name") }, singleLine = true)
                 OutlinedTextField(group, { group = it }, label = { Text(if (groups.isEmpty()) "Group (optional)" else "Group") }, singleLine = true)
-                Text("Each session gets its own persistent browser profile. No software session-count cap is imposed.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Each session gets its own persistent browser profile.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         },
         confirmButton = { Button(enabled = name.isNotBlank(), onClick = { onCreate(name.trim(), group.trim()) }) { Text("Create & Open") } },
@@ -379,71 +382,133 @@ private fun BrowserScreen(session: SessionMeta, onBack: () -> Unit, onCreateAnot
     var canBack by remember { mutableStateOf(false) }
     var canForward by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
+    var currentUrl by remember { mutableStateOf(HOME_URL) }
+    var pageTitle by remember { mutableStateOf("Loading...") }
+    var loadingProgress by remember { mutableIntStateOf(0) }
+    var isLoading by remember { mutableStateOf(true) }
+    var errorMsg by remember { mutableStateOf<String?>(null) }
 
     Scaffold(
         contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
-            TopAppBar(
-                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Close session") } },
-                title = {
-                    Column {
-                        Text(session.name, fontWeight = FontWeight.SemiBold)
-                        Text(if (session.group.isBlank()) "Ungrouped" else session.group, style = MaterialTheme.typography.labelSmall)
-                    }
-                },
-                actions = {
-                    IconButton(enabled = canBack, onClick = { webViewRef?.goBack() }) { Icon(Icons.Default.ArrowBack, "Back") }
-                    IconButton(onClick = { webViewRef?.reload() }) { Icon(Icons.Default.Refresh, "Reload") }
-                    IconButton(enabled = canForward, onClick = { webViewRef?.goForward() }) { Icon(Icons.Default.ArrowForward, "Forward") }
-                    IconButton(onClick = { showMenu = true }) { Icon(Icons.Default.MoreVert, "More") }
-                    DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-                        DropdownMenuItem(
-                            text = { Text("Home") },
-                            leadingIcon = { Icon(Icons.Default.Home, null) },
-                            onClick = { webViewRef?.loadUrl(HOME_URL); showMenu = false }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Create another session") },
-                            leadingIcon = { Icon(Icons.Default.Add, null) },
-                            onClick = { showMenu = false; onCreateAnother() }
-                        )
-                        DropdownMenuItem(text = { Text("Close") }, onClick = { showMenu = false; onBack() })
-                    }
-                },
-            )
+            Column {
+                TopAppBar(
+                    navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Close session") } },
+                    title = {
+                        Column {
+                            Text(pageTitle, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                            Text(currentUrl, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                        }
+                    },
+                    actions = {
+                        IconButton(enabled = canBack, onClick = { webViewRef?.goBack() }) { Icon(Icons.Default.ArrowBack, "Back") }
+                        IconButton(onClick = { errorMsg = null; webViewRef?.reload() }) { Icon(Icons.Default.Refresh, "Reload") }
+                        IconButton(enabled = canForward, onClick = { webViewRef?.goForward() }) { Icon(Icons.Default.ArrowForward, "Forward") }
+                        IconButton(onClick = { showMenu = true }) { Icon(Icons.Default.MoreVert, "More") }
+                        DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Home") },
+                                leadingIcon = { Icon(Icons.Default.Home, null) },
+                                onClick = { webViewRef?.loadUrl(HOME_URL); showMenu = false }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Create another session") },
+                                leadingIcon = { Icon(Icons.Default.Add, null) },
+                                onClick = { showMenu = false; onCreateAnother() }
+                            )
+                            DropdownMenuItem(text = { Text("Close") }, onClick = { showMenu = false; onBack() })
+                        }
+                    },
+                )
+                if (isLoading) {
+                    LinearProgressIndicator(
+                        progress = { loadingProgress / 100f },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
         }
     ) { pad ->
-        AndroidView(
-            modifier = Modifier.fillMaxSize().padding(pad),
-            factory = { context ->
-                WebView(context).apply {
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    settings.loadsImagesAutomatically = true
-                    settings.useWideViewPort = true
-                    settings.loadWithOverviewMode = false
-                    settings.builtInZoomControls = false
-                    settings.displayZoomControls = false
-                    CookieManager.getInstance().setAcceptCookie(true)
-                    webViewClient = object : WebViewClient() {
-                        override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = false
+        Box(Modifier.fillMaxSize().padding(pad)) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { context ->
+                    WebView(context).apply {
+                        settings.javaScriptEnabled = true
+                        settings.domStorageEnabled = true
+                        settings.loadsImagesAutomatically = true
+                        settings.useWideViewPort = true
+                        settings.loadWithOverviewMode = false
+                        settings.builtInZoomControls = false
+                        settings.displayZoomControls = false
+                        settings.setSupportZoom(false)
+                        settings.userAgentString = "Mozilla/5.0 (Linux; Android 13; Samsung M21) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+                        CookieManager.getInstance().setAcceptCookie(true)
+                        CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                        webViewClient = object : WebViewClient() {
+                            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = false
+                            override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+                                currentUrl = url
+                                isLoading = true
+                                errorMsg = null
+                                canBack = view.canGoBack()
+                                canForward = view.canGoForward()
+                            }
+                            override fun onPageFinished(view: WebView, url: String) {
+                                currentUrl = url
+                                isLoading = false
+                                canBack = view.canGoBack()
+                                canForward = view.canGoForward()
+                            }
+                            override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+                                if (request.isForMainFrame) {
+                                    isLoading = false
+                                    errorMsg = "Error ${error.errorCode}: ${error.description}"
+                                }
+                            }
+                        }
+                        webChromeClient = object : WebChromeClient() {
+                            override fun onProgressChanged(view: WebView, newProgress: Int) {
+                                loadingProgress = newProgress
+                                isLoading = newProgress < 100
+                            }
+                            override fun onReceivedTitle(view: WebView, title: String) {
+                                pageTitle = title
+                            }
+                        }
+                        if (WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
+                            WebViewCompat.setProfile(this, session.profileName)
+                        }
+                        loadUrl(HOME_URL)
+                        webViewRef = this
                     }
-                    webChromeClient = WebChromeClient()
-                    if (WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
-                        WebViewCompat.setProfile(this, session.profileName)
-                    }
-                    loadUrl(HOME_URL)
-                    webViewRef = this
-                    canBack = canGoBack()
-                    canForward = canGoForward()
+                },
+                update = {
+                    webViewRef = it
+                    canBack = it.canGoBack()
+                    canForward = it.canGoForward()
+                },
+                onRelease = { it.stopLoading(); it.destroy() },
+            )
+
+            errorMsg?.let { err ->
+                Column(
+                    Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.95f))
+                        .padding(24.dp),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text("Failed to load page", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onErrorContainer, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(8.dp))
+                    Text(err, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer)
+                    Spacer(Modifier.height(8.dp))
+                    Text(currentUrl, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onErrorContainer)
+                    Spacer(Modifier.height(16.dp))
+                    Button(onClick = { errorMsg = null; webViewRef?.reload() }) { Text("Retry") }
                 }
-            },
-            update = {
-                webViewRef = it
-                canBack = it.canGoBack()
-                canForward = it.canGoForward()
-            },
-            onRelease = { it.stopLoading(); it.destroy() },
-        )
+            }
+        }
     }
 }
