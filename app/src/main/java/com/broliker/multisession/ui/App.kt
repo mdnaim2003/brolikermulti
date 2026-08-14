@@ -238,6 +238,122 @@ private fun parseImportJson(
     return result
 }
 
+// ─── Cookie Copy Function ───────────────────────────────────────────────────
+
+private fun copySessionCookiesAsJson(
+    context: Context,
+    session: SessionMeta,
+    currentUrl: String,
+    pageTitle: String,
+) {
+    try {
+        val cookieManager = CookieManager.getInstance()
+
+        // Facebook-এর সব known domain থেকে cookie collect করো
+        val domains = listOf(
+            "https://m.facebook.com",
+            "https://www.facebook.com",
+            "https://facebook.com",
+            "https://static.xx.fbcdn.net",
+        )
+
+        val cookieJson = JSONObject()
+
+        domains.forEach { domain ->
+            val raw = cookieManager.getCookie(domain)
+            if (!raw.isNullOrBlank()) {
+                // "key=value; key2=value2" format কে JSON object এ convert করো
+                val domainObj = JSONObject()
+                raw.split(";").forEach { part ->
+                    val trimmed = part.trim()
+                    val eqIndex = trimmed.indexOf('=')
+                    if (eqIndex > 0) {
+                        val key = trimmed.substring(0, eqIndex).trim()
+                        val value = trimmed.substring(eqIndex + 1).trim()
+                        if (key.isNotEmpty()) {
+                            domainObj.put(key, value)
+                        }
+                    }
+                }
+                if (domainObj.length() > 0) {
+                    cookieJson.put(domain, domainObj)
+                }
+            }
+        }
+
+        // বর্তমান URL-এর cookie-ও নাও (Facebook internal URLs)
+        if (currentUrl.isNotBlank() && !domains.any { currentUrl.startsWith(it) }) {
+            val raw = cookieManager.getCookie(currentUrl)
+            if (!raw.isNullOrBlank()) {
+                val domainObj = JSONObject()
+                raw.split(";").forEach { part ->
+                    val trimmed = part.trim()
+                    val eqIndex = trimmed.indexOf('=')
+                    if (eqIndex > 0) {
+                        val key = trimmed.substring(0, eqIndex).trim()
+                        val value = trimmed.substring(eqIndex + 1).trim()
+                        if (key.isNotEmpty()) {
+                            domainObj.put(key, value)
+                        }
+                    }
+                }
+                if (domainObj.length() > 0) {
+                    cookieJson.put(currentUrl, domainObj)
+                }
+            }
+        }
+
+        // Final output JSON
+        val output = JSONObject().apply {
+            put("app", "Bro Liker")
+            put("session_id", session.id)
+            put("session_name", session.name)
+            put("profile_name", session.profileName)
+            put("group", session.group)
+            put("current_url", currentUrl)
+            put("page_title", pageTitle)
+            put("exported_at", System.currentTimeMillis())
+            put("cookies", cookieJson)
+        }
+
+        val jsonString = output.toString(2)
+
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(
+            ClipData.newPlainText("BroLiker Cookies", jsonString)
+        )
+
+        // কতটা key copy হলো সেটা count করো
+        var totalKeys = 0
+        domains.forEach { domain ->
+            if (cookieJson.has(domain)) {
+                totalKeys += cookieJson.getJSONObject(domain).length()
+            }
+        }
+
+        if (totalKeys > 0) {
+            Toast.makeText(
+                context,
+                "✅ $totalKeys cookie keys copied! (${session.name})",
+                Toast.LENGTH_SHORT,
+            ).show()
+        } else {
+            Toast.makeText(
+                context,
+                "⚠️ No cookies found. Login first then try again.",
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+
+    } catch (e: Exception) {
+        Toast.makeText(
+            context,
+            "❌ Error: ${e.message}",
+            Toast.LENGTH_LONG,
+        ).show()
+    }
+}
+
 // ─── Main composable ──────────────────────────────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1480,8 +1596,26 @@ private fun BrowserScreen(
                                 onClick = { showMenu = false; onCreateAnother() }
                             )
                             DropdownMenuItem(
+                                text = { Text("📋 Copy Cookies (JSON)") },
+                                leadingIcon = { Icon(Icons.Default.ContentCopy, null) },
+                                onClick = {
+                                    showMenu = false
+                                    flushProfileCookies()
+                                    copySessionCookiesAsJson(
+                                        context = context,
+                                        session = session,
+                                        currentUrl = currentUrl,
+                                        pageTitle = pageTitle,
+                                    )
+                                }
+                            )
+                            DropdownMenuItem(
                                 text = { Text("Close") },
-                                onClick = { showMenu = false; flushProfileCookies(); onBack() }
+                                onClick = {
+                                    showMenu = false
+                                    flushProfileCookies()
+                                    onBack()
+                                }
                             )
                         }
                     }
