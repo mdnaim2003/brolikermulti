@@ -202,6 +202,73 @@ private fun copySafeSessionInfo(
     ).show()
 }
 
+private fun getCookiesAsJson(
+    context: Context,
+    session: SessionMeta,
+    currentUrl: String,
+    multiProfileSupported: Boolean,
+): String {
+    val rawCookies: String? = if (multiProfileSupported) {
+        runCatching {
+            val profileStore = ProfileStore.getInstance()
+            profileStore.getProfile(session.profileName)
+                ?.cookieManager
+                ?.getCookie(currentUrl)
+        }.getOrNull()
+    } else {
+        CookieManager.getInstance().getCookie(currentUrl)
+    }
+
+    val json = JSONObject()
+
+    if (!rawCookies.isNullOrBlank()) {
+        rawCookies
+            .split(";")
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .forEach { pair ->
+                val idx = pair.indexOf('=')
+                if (idx > 0) {
+                    val key = pair.substring(0, idx).trim()
+                    val value = pair.substring(idx + 1).trim()
+                    json.put(key, value)
+                }
+            }
+    }
+
+    return json.toString(2)
+}
+
+private fun copyCookieInfo(
+    context: Context,
+    session: SessionMeta,
+    currentUrl: String,
+    multiProfileSupported: Boolean,
+) {
+    val json = getCookiesAsJson(
+        context = context,
+        session = session,
+        currentUrl = currentUrl,
+        multiProfileSupported = multiProfileSupported,
+    )
+
+    val clipboard =
+        context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+
+    clipboard.setPrimaryClip(
+        ClipData.newPlainText(
+            "Bro Liker Cookie Info",
+            json,
+        )
+    )
+
+    Toast.makeText(
+        context,
+        "Cookie info copied",
+        Toast.LENGTH_SHORT,
+    ).show()
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BroLikerApp() {
@@ -1801,6 +1868,34 @@ private fun BrowserScreen(
                                         session = session,
                                         currentUrl = currentUrl,
                                         pageTitle = pageTitle,
+                                    )
+                                },
+                            )
+
+                            DropdownMenuItem(
+
+                                text = {
+                                    Text("Copy Cookie Info")
+                                },
+
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Default.ContentCopy,
+                                        null,
+                                    )
+                                },
+
+                                onClick = {
+
+                                    showMenu = false
+
+                                    flushProfileCookies()
+
+                                    copyCookieInfo(
+                                        context = context,
+                                        session = session,
+                                        currentUrl = currentUrl,
+                                        multiProfileSupported = multiProfileSupported,
                                     )
                                 },
                             )
