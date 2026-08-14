@@ -1,14 +1,13 @@
 package com.broliker.multisession.ui
 
 import android.annotation.SuppressLint
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
+import android.net.Uri
 import android.os.Message
 import android.view.ViewGroup
 import android.widget.FrameLayout
-import android.widget.Toast
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
@@ -16,19 +15,25 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -38,20 +43,26 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowForward
-import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.FilterList
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SelectAll
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SwapVert
+import androidx.compose.material.icons.filled.ArrowBackIosNew
+import androidx.compose.material.icons.filled.ArrowForwardIos
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.Divider
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -61,12 +72,16 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -74,20 +89,22 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.platform.LocalContext
 import androidx.webkit.ProfileStore
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import org.json.JSONArray
 import org.json.JSONObject
-import java.net.URLEncoder
 import java.util.UUID
+import kotlin.math.max
 
-private const val HOME_URL = "https://m.facebook.com/"
+private const val HOME_URL = "https://mbasic.facebook.com/"
+private const val PAGE_SIZE = 50
 
 private data class SessionMeta(
     val id: String,
@@ -99,187 +116,299 @@ private data class SessionMeta(
     val archived: Boolean = false,
 )
 
-private class SessionStore(context: Context) {
-    private val prefs = context.getSharedPreferences("bro_sessions", Context.MODE_PRIVATE)
+private class SessionStore(
+    context: Context,
+) {
+    private val prefs =
+        context.getSharedPreferences(
+            "bro_sessions",
+            Context.MODE_PRIVATE,
+        )
 
-    fun load(): List<SessionMeta> = runCatching {
-        val arr = JSONArray(prefs.getString("items", "[]"))
-
-        buildList {
-            for (i in 0 until arr.length()) {
-                val o = arr.getJSONObject(i)
-
-                add(
-                    SessionMeta(
-                        id = o.getString("id"),
-                        profileName = o.getString("profileName"),
-                        name = o.getString("name"),
-                        group = o.optString("group"),
-                        createdAt = o.optLong("createdAt"),
-                        lastOpenedAt = o.optLong("lastOpenedAt"),
-                        archived = o.optBoolean("archived", false),
-                    )
+    fun load(): List<SessionMeta> =
+        runCatching {
+            val arr =
+                JSONArray(
+                    prefs.getString(
+                        "items",
+                        "[]",
+                    ),
                 )
-            }
-        }
-    }.getOrDefault(emptyList())
-        .sortedBy { it.name.lowercase() }
 
-    fun save(items: List<SessionMeta>) {
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+
+                    add(
+                        SessionMeta(
+                            id = o.getString("id"),
+                            profileName = o.getString("profileName"),
+                            name = o.getString("name"),
+                            group = o.optString("group"),
+                            createdAt = o.optLong("createdAt"),
+                            lastOpenedAt = o.optLong(
+                                "lastOpenedAt",
+                            ),
+                            archived = o.optBoolean(
+                                "archived",
+                                false,
+                            ),
+                        ),
+                    )
+                }
+            }
+        }.getOrDefault(emptyList())
+
+    fun save(
+        items: List<SessionMeta>,
+    ) {
         val arr = JSONArray()
 
         items.forEach { s ->
             arr.put(
                 JSONObject().apply {
                     put("id", s.id)
-                    put("profileName", s.profileName)
+                    put(
+                        "profileName",
+                        s.profileName,
+                    )
                     put("name", s.name)
                     put("group", s.group)
-                    put("createdAt", s.createdAt)
-                    put("lastOpenedAt", s.lastOpenedAt)
-                    put("archived", s.archived)
-                }
+                    put(
+                        "createdAt",
+                        s.createdAt,
+                    )
+                    put(
+                        "lastOpenedAt",
+                        s.lastOpenedAt,
+                    )
+                    put(
+                        "archived",
+                        s.archived,
+                    )
+                },
             )
         }
 
         prefs.edit()
-            .putString("items", arr.toString())
+            .putString(
+                "items",
+                arr.toString(),
+            )
             .apply()
     }
 }
 
-private fun buildSafeSessionInfoJson(
-    session: SessionMeta,
-    currentUrl: String,
-    pageTitle: String,
-): String {
-    val json = JSONObject().apply {
-        put("app", "Bro Liker")
-        put("session_id", session.id)
-        put("session_name", session.name)
-        put("profile_name", session.profileName)
-        put("group", session.group)
-        put("current_url", currentUrl)
-        put("page_title", pageTitle)
-        put("created_at", session.createdAt)
-        put("last_opened_at", session.lastOpenedAt)
-        put("archived", session.archived)
-        put(
-            "export_note",
-            "Session metadata only. Authentication cookies/tokens are not exported."
-        )
+private fun nextSessionNumber(
+    sessions: List<SessionMeta>,
+): Int {
+    var maxNumber = 0
+
+    sessions.forEach { session ->
+        val match =
+            Regex(
+                "^My Session (\\d+)$",
+            ).find(session.name.trim())
+
+        if (match != null) {
+            val number =
+                match.groupValues
+                    .getOrNull(1)
+                    ?.toIntOrNull()
+                    ?: 0
+
+            maxNumber =
+                max(
+                    maxNumber,
+                    number,
+                )
+        }
     }
 
-    return json.toString(2)
+    return maxNumber + 1
 }
 
-private fun copySafeSessionInfo(
-    context: Context,
-    session: SessionMeta,
-    currentUrl: String,
-    pageTitle: String,
-) {
-    val clipboard =
-        context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-
-    val json = buildSafeSessionInfoJson(
-        session = session,
-        currentUrl = currentUrl,
-        pageTitle = pageTitle,
-    )
-
-    clipboard.setPrimaryClip(
-        ClipData.newPlainText(
-            "Bro Liker Session Info",
-            json,
-        )
-    )
-
-    Toast.makeText(
-        context,
-        "Session info copied",
-        Toast.LENGTH_SHORT,
-    ).show()
-}
-
-private fun getCookiesAsJson(
-    context: Context,
-    session: SessionMeta,
-    currentUrl: String,
-    multiProfileSupported: Boolean,
+private fun uniqueImportedName(
+    existing: List<SessionMeta>,
+    base: String,
 ): String {
-    val rawCookies: String? = if (multiProfileSupported) {
-        runCatching {
-            val profileStore = ProfileStore.getInstance()
-            profileStore.getProfile(session.profileName)
-                ?.cookieManager
-                ?.getCookie(currentUrl)
-        }.getOrNull()
-    } else {
-        CookieManager.getInstance().getCookie(currentUrl)
+    val names =
+        existing
+            .map { it.name.lowercase() }
+            .toMutableSet()
+
+    if (!names.contains(base.lowercase())) {
+        return base
     }
 
-    val json = JSONObject()
+    var index = 2
 
-    if (!rawCookies.isNullOrBlank()) {
-        rawCookies
-            .split(";")
-            .map { it.trim() }
-            .filter { it.isNotBlank() }
-            .forEach { pair ->
-                val idx = pair.indexOf('=')
-                if (idx > 0) {
-                    val key = pair.substring(0, idx).trim()
-                    val value = pair.substring(idx + 1).trim()
-                    json.put(key, value)
-                }
+    while (
+        names.contains(
+            "$base ($index)".lowercase(),
+        )
+    ) {
+        index++
+    }
+
+    return "$base ($index)"
+}
+
+private fun buildBackupJson(
+    sessions: List<SessionMeta>,
+): String {
+    val root =
+        JSONObject().apply {
+            put(
+                "format",
+                "bro_liker_session_backup",
+            )
+            put(
+                "version",
+                1,
+            )
+            put(
+                "created_at",
+                System.currentTimeMillis(),
+            )
+            put(
+                "session_count",
+                sessions.size,
+            )
+            put(
+                "credentials_included",
+                false,
+            )
+            put(
+                "note",
+                "Session metadata/profile references only. Authentication cookies or tokens are not exported.",
+            )
+
+            val items =
+                JSONArray()
+
+            sessions.forEach { s ->
+                items.put(
+                    JSONObject().apply {
+                        put("id", s.id)
+                        put(
+                            "profile_name",
+                            s.profileName,
+                        )
+                        put(
+                            "name",
+                            s.name,
+                        )
+                        put(
+                            "group",
+                            s.group,
+                        )
+                        put(
+                            "created_at",
+                            s.createdAt,
+                        )
+                        put(
+                            "last_opened_at",
+                            s.lastOpenedAt,
+                        )
+                        put(
+                            "archived",
+                            s.archived,
+                        )
+                    },
+                )
             }
-    }
 
-    return json.toString(2)
+            put(
+                "sessions",
+                items,
+            )
+        }
+
+    return root.toString(2)
 }
 
-private fun copyCookieInfo(
-    context: Context,
-    session: SessionMeta,
-    currentUrl: String,
-    multiProfileSupported: Boolean,
-) {
-    val json = getCookiesAsJson(
-        context = context,
-        session = session,
-        currentUrl = currentUrl,
-        multiProfileSupported = multiProfileSupported,
-    )
+private fun importBackupJson(
+    existing: List<SessionMeta>,
+    raw: String,
+): List<SessionMeta> {
+    val root =
+        JSONObject(raw)
 
-    val clipboard =
-        context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-
-    clipboard.setPrimaryClip(
-        ClipData.newPlainText(
-            "Bro Liker Cookie Info",
-            json,
+    if (
+        root.optString("format") !=
+        "bro_liker_session_backup"
+    ) {
+        throw IllegalArgumentException(
+            "Invalid Bro Liker backup file.",
         )
-    )
+    }
 
-    Toast.makeText(
-        context,
-        "Cookie info copied",
-        Toast.LENGTH_SHORT,
-    ).show()
+    val arr =
+        root.optJSONArray("sessions")
+            ?: throw IllegalArgumentException(
+                "No sessions found in backup.",
+            )
+
+    val result =
+        existing.toMutableList()
+
+    for (i in 0 until arr.length()) {
+        val item =
+            arr.getJSONObject(i)
+
+        val baseName =
+            item.optString(
+                "name",
+                "Imported Session",
+            )
+
+        val name =
+            uniqueImportedName(
+                result,
+                baseName,
+            )
+
+        val profileName =
+            "profile_${UUID.randomUUID()}"
+
+        result +=
+            SessionMeta(
+                id = UUID.randomUUID().toString(),
+                profileName = profileName,
+                name = name,
+                group = item.optString(
+                    "group",
+                ),
+                createdAt =
+                    System.currentTimeMillis(),
+                lastOpenedAt = 0L,
+                archived =
+                    item.optBoolean(
+                        "archived",
+                        false,
+                    ),
+            )
+    }
+
+    return result
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BroLikerApp() {
-    val context = LocalContext.current.applicationContext
+    val context =
+        LocalContext.current.applicationContext
 
-    val store = remember {
-        SessionStore(context)
-    }
+    val store =
+        remember {
+            SessionStore(context)
+        }
 
     var sessions by remember {
-        mutableStateOf(store.load())
+        mutableStateOf(
+            store.load(),
+        )
     }
 
     var selected by remember {
@@ -294,7 +423,7 @@ fun BroLikerApp() {
         mutableStateOf<SessionMeta?>(null)
     }
 
-    var showGroup by remember {
+    var showGroupManager by remember {
         mutableStateOf(false)
     }
 
@@ -303,6 +432,10 @@ fun BroLikerApp() {
     }
 
     var showMore by remember {
+        mutableStateOf(false)
+    }
+
+    var showSettings by remember {
         mutableStateOf(false)
     }
 
@@ -318,6 +451,99 @@ fun BroLikerApp() {
         mutableStateOf(setOf<String>())
     }
 
+    var page by remember {
+        mutableIntStateOf(0)
+    }
+
+    var importMessage by remember {
+        mutableStateOf<String?>(null)
+    }
+
+    val exportLauncher =
+        rememberLauncherForActivityResult(
+            contract =
+                ActivityResultContracts.CreateDocument(
+                    "application/json",
+                ),
+        ) { uri: Uri? ->
+
+            if (uri != null) {
+                runCatching {
+                    context.contentResolver
+                        .openOutputStream(uri)
+                        ?.use { output ->
+
+                            output.write(
+                                buildBackupJson(
+                                    sessions,
+                                ).toByteArray(
+                                    Charsets.UTF_8,
+                                ),
+                            )
+                        }
+                }.onSuccess {
+                    importMessage =
+                        "Backup exported successfully."
+                }.onFailure {
+                    importMessage =
+                        "Export failed: ${it.message}"
+                }
+            }
+        }
+
+    val importLauncher =
+        rememberLauncherForActivityResult(
+            contract =
+                ActivityResultContracts.OpenDocument(),
+        ) { uri: Uri? ->
+
+            if (uri != null) {
+                runCatching {
+                    val raw =
+                        context.contentResolver
+                            .openInputStream(uri)
+                            ?.use {
+                                it.readBytes()
+                                    .toString(
+                                        Charsets.UTF_8,
+                                    )
+                            }
+                            ?: throw IllegalArgumentException(
+                                "Unable to read file.",
+                            )
+
+                    val imported =
+                        importBackupJson(
+                            sessions,
+                            raw,
+                        )
+
+                    sessions = imported
+
+                    store.save(
+                        imported,
+                    )
+
+                    page = 0
+
+                    imported
+                }.onSuccess { imported ->
+                    importMessage =
+                        "Imported ${imported.size - sessions.size + imported.size} sessions."
+                }.onFailure {
+                    importMessage =
+                        "Import failed: ${it.message}"
+                }
+            }
+        }
+
+    LaunchedEffect(
+        query,
+        filter,
+    ) {
+        page = 0
+    }
+
     if (selected != null) {
         BrowserScreen(
             session = selected!!,
@@ -331,27 +557,55 @@ fun BroLikerApp() {
 
         if (showCreate) {
             CreateSessionDialog(
-                groups = sessions
-                    .map { it.group }
-                    .filter { it.isNotBlank() }
-                    .distinct()
-                    .sorted(),
+                groups =
+                    sessions
+                        .map { it.group }
+                        .filter {
+                            it.isNotBlank()
+                        }
+                        .distinct()
+                        .sorted(),
+                suggestedName =
+                    "My Session ${
+                        nextSessionNumber(
+                            sessions,
+                        )
+                    }",
                 onDismiss = {
                     showCreate = false
                 },
             ) { name, group ->
 
-                val profileName = "profile_${UUID.randomUUID()}"
+                val finalName =
+                    if (name.isBlank()) {
+                        "My Session ${
+                            nextSessionNumber(
+                                sessions,
+                            )
+                        }"
+                    } else {
+                        name.trim()
+                    }
 
-                val meta = SessionMeta(
-                    id = UUID.randomUUID().toString(),
-                    profileName = profileName,
-                    name = name,
-                    group = group,
-                    createdAt = System.currentTimeMillis(),
-                )
+                val profileName =
+                    "profile_${UUID.randomUUID()}"
 
-                sessions = sessions + meta
+                val meta =
+                    SessionMeta(
+                        id =
+                            UUID.randomUUID()
+                                .toString(),
+                        profileName =
+                            profileName,
+                        name = finalName,
+                        group = group,
+                        createdAt =
+                            System.currentTimeMillis(),
+                    )
+
+                sessions =
+                    sessions + meta
+
                 store.save(sessions)
 
                 selected = meta
@@ -363,52 +617,112 @@ fun BroLikerApp() {
     }
 
     val groups =
-        listOf("All", "Ungrouped") +
-            sessions
-                .map { it.group }
-                .filter { it.isNotBlank() }
-                .distinct()
-                .sorted()
-
-    val visible = sessions
-        .filter { !it.archived }
-        .filter { session ->
-
-            val groupOk = when (filter) {
-                "All" -> true
-                "Ungrouped" -> session.group.isBlank()
-                else -> session.group == filter
+        sessions
+            .map {
+                it.group.trim()
             }
+            .filter {
+                it.isNotBlank()
+            }
+            .distinct()
+            .sorted()
 
-            groupOk &&
-                (
+    val filtered =
+        sessions
+            .filter {
+                !it.archived
+            }
+            .filter { session ->
+
+                val groupOk =
+                    when {
+                        filter == "All" ->
+                            true
+
+                        filter ==
+                            "Ungrouped" ->
+                            session.group.isBlank()
+
+                        else ->
+                            session.group ==
+                                filter
+                    }
+
+                val searchOk =
                     query.isBlank() ||
                         session.name.contains(
                             query,
                             ignoreCase = true,
                         )
-                    )
+
+                groupOk && searchOk
+            }
+
+    val totalPages =
+        max(
+            1,
+            (
+                filtered.size +
+                    PAGE_SIZE -
+                    1
+                ) /
+                    PAGE_SIZE,
+        )
+
+    if (page >= totalPages) {
+        page =
+            totalPages - 1
+    }
+
+    val fromIndex =
+        page * PAGE_SIZE
+
+    val toIndex =
+        minOf(
+            fromIndex + PAGE_SIZE,
+            filtered.size,
+        )
+
+    val visible =
+        if (fromIndex < toIndex) {
+            filtered.subList(
+                fromIndex,
+                toIndex,
+            )
+        } else {
+            emptyList()
         }
 
     val allVisibleSelected =
         visible.isNotEmpty() &&
-            visible.all { it.id in selectedIds }
+            visible.all {
+                it.id in selectedIds
+            }
 
     Scaffold(
-        contentWindowInsets = WindowInsets.safeDrawing,
+        contentWindowInsets =
+            WindowInsets.safeDrawing,
 
         topBar = {
             TopAppBar(
+
                 title = {
                     Column {
                         Text(
                             "Bro Liker",
-                            fontWeight = FontWeight.Bold,
+                            fontWeight =
+                                FontWeight.Bold,
                         )
 
                         Text(
-                            "${sessions.count { !it.archived }} sessions",
-                            style = MaterialTheme.typography.labelSmall,
+                            "${filtered.size} sessions • Page ${page + 1}/$totalPages",
+                            style =
+                                MaterialTheme
+                                    .typography
+                                    .labelSmall,
+                            maxLines = 1,
+                            overflow =
+                                TextOverflow.Ellipsis,
                         )
                     }
                 },
@@ -418,33 +732,48 @@ fun BroLikerApp() {
                     IconButton(
                         onClick = {
                             showCreate = true
-                        }
+                        },
                     ) {
                         Icon(
                             Icons.Default.Add,
-                            contentDescription = "Create session",
+                            contentDescription =
+                                "Create session",
                         )
                     }
 
                     IconButton(
                         onClick = {
-                            showGroup = true
-                        }
+                            showGroupManager = true
+                        },
                     ) {
                         Icon(
-                            Icons.Default.FilterList,
-                            contentDescription = "Groups",
+                            Icons.Default.Folder,
+                            contentDescription =
+                                "Groups",
+                        )
+                    }
+
+                    IconButton(
+                        onClick = {
+                            showSettings = true
+                        },
+                    ) {
+                        Icon(
+                            Icons.Default.Settings,
+                            contentDescription =
+                                "Settings",
                         )
                     }
 
                     IconButton(
                         onClick = {
                             showMore = true
-                        }
+                        },
                     ) {
                         Icon(
                             Icons.Default.MoreVert,
-                            contentDescription = "More",
+                            contentDescription =
+                                "More",
                         )
                     }
 
@@ -457,25 +786,30 @@ fun BroLikerApp() {
 
                         DropdownMenuItem(
                             text = {
-                                Text("Select all visible")
+                                Text(
+                                    "Select all on this page",
+                                )
                             },
-
                             leadingIcon = {
                                 Icon(
                                     Icons.Default.SelectAll,
                                     null,
                                 )
                             },
-
                             onClick = {
-
                                 selectedIds =
-                                    if (allVisibleSelected) {
-                                        emptySet()
+                                    if (
+                                        allVisibleSelected
+                                    ) {
+                                        selectedIds -
+                                            visible.map {
+                                                it.id
+                                            }
                                     } else {
-                                        visible
-                                            .map { it.id }
-                                            .toSet()
+                                        selectedIds +
+                                            visible.map {
+                                                it.id
+                                            }
                                     }
 
                                 showMore = false
@@ -484,29 +818,32 @@ fun BroLikerApp() {
 
                         DropdownMenuItem(
                             text = {
-                                Text("Clear selection")
+                                Text(
+                                    "Clear selection",
+                                )
                             },
-
                             onClick = {
-                                selectedIds = emptySet()
+                                selectedIds =
+                                    emptySet()
                                 showMore = false
                             },
                         )
 
                         DropdownMenuItem(
                             text = {
-                                Text("Bulk move to group")
+                                Text(
+                                    "Bulk move to group",
+                                )
                             },
-
                             leadingIcon = {
                                 Icon(
                                     Icons.Default.SwapVert,
                                     null,
                                 )
                             },
-
-                            enabled = selectedIds.isNotEmpty(),
-
+                            enabled =
+                                selectedIds
+                                    .isNotEmpty(),
                             onClick = {
                                 showBulkGroup = true
                                 showMore = false
@@ -525,34 +862,37 @@ fun BroLikerApp() {
             ) {
                 Icon(
                     Icons.Default.Add,
-                    contentDescription = "Create session",
+                    contentDescription =
+                        "Create session",
                 )
             }
         },
+
     ) { pad ->
 
         Column(
             Modifier
                 .fillMaxSize()
                 .padding(pad)
-                .padding(16.dp)
+                .padding(
+                    horizontal = 16.dp,
+                    vertical = 10.dp,
+                ),
         ) {
 
             OutlinedTextField(
                 value = query,
-
                 onValueChange = {
                     query = it
                 },
-
-                modifier = Modifier.fillMaxWidth(),
-
+                modifier =
+                    Modifier.fillMaxWidth(),
                 singleLine = true,
-
                 label = {
-                    Text("Search sessions")
+                    Text(
+                        "Search sessions",
+                    )
                 },
-
                 leadingIcon = {
                     Icon(
                         Icons.Default.Search,
@@ -562,152 +902,332 @@ fun BroLikerApp() {
             )
 
             Spacer(
-                Modifier.height(10.dp)
+                Modifier.height(10.dp),
             )
 
-            LazyColumn(
-                horizontalAlignment = Alignment.Start,
-
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-
-                contentPadding =
-                    androidx.compose.foundation.layout.PaddingValues(
-                        bottom = 96.dp,
-                    ),
+            Row(
+                modifier =
+                    Modifier
+                        .fillMaxWidth(),
+                horizontalArrangement =
+                    Arrangement.spacedBy(8.dp),
+                verticalAlignment =
+                    Alignment.CenterVertically,
             ) {
 
-                item {
+                FilterChip(
+                    selected =
+                        filter == "All",
+                    onClick = {
+                        filter = "All"
+                    },
+                    label = {
+                        Text("All")
+                    },
+                )
 
-                    Row(
-                        horizontalArrangement =
-                            Arrangement.spacedBy(8.dp)
+                FilterChip(
+                    selected =
+                        filter ==
+                            "Ungrouped",
+                    onClick = {
+                        filter =
+                            "Ungrouped"
+                    },
+                    label = {
+                        Text("Ungrouped")
+                    },
+                )
+
+                Spacer(
+                    Modifier.weight(1f),
+                )
+
+                if (
+                    selectedIds.isNotEmpty()
+                ) {
+                    Text(
+                        "${selectedIds.size} selected",
+                        style =
+                            MaterialTheme
+                                .typography
+                                .labelMedium,
+                    )
+                }
+            }
+
+            if (groups.isNotEmpty()) {
+
+                Spacer(
+                    Modifier.height(6.dp),
+                )
+
+                LazyGroupRow(
+                    groups = groups,
+                    selectedGroup = filter,
+                    onSelect = {
+                        filter = it
+                    },
+                )
+            }
+
+            Spacer(
+                Modifier.height(8.dp),
+            )
+
+            if (
+                visible.isEmpty()
+            ) {
+
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    contentAlignment =
+                        Alignment.Center,
+                ) {
+
+                    Column(
+                        horizontalAlignment =
+                            Alignment.CenterHorizontally,
                     ) {
 
-                        groups
-                            .take(6)
-                            .forEach { group ->
+                        Text(
+                            "No sessions found",
+                            fontWeight =
+                                FontWeight.SemiBold,
+                        )
 
-                                FilterChip(
-                                    selected = filter == group,
+                        Spacer(
+                            Modifier.height(8.dp),
+                        )
 
-                                    onClick = {
-                                        filter = group
-                                    },
+                        Text(
+                            "Create a new session to get started.",
+                            style =
+                                MaterialTheme
+                                    .typography
+                                    .bodySmall,
+                            color =
+                                MaterialTheme
+                                    .colorScheme
+                                    .onSurfaceVariant,
+                        )
 
-                                    label = {
-                                        Text(group)
-                                    },
-                                )
-                            }
+                        Spacer(
+                            Modifier.height(14.dp),
+                        )
+
+                        Button(
+                            onClick = {
+                                showCreate = true
+                            },
+                        ) {
+                            Icon(
+                                Icons.Default.Add,
+                                null,
+                            )
+
+                            Spacer(
+                                Modifier.width(6.dp),
+                            )
+
+                            Text(
+                                "Create Session",
+                            )
+                        }
                     }
                 }
 
-                items(
-                    visible,
-                    key = {
-                        it.id
-                    }
-                ) { session ->
+            } else {
 
-                    SessionCard(
-                        session = session,
+                LazyColumn(
+                    modifier =
+                        Modifier.weight(1f),
+                    verticalArrangement =
+                        Arrangement.spacedBy(8.dp),
+                    contentPadding =
+                        PaddingValues(
+                            bottom = 100.dp,
+                        ),
+                ) {
 
-                        selected =
-                            session.id in selectedIds,
-
-                        onSelect = {
-
-                            selectedIds =
-                                if (session.id in selectedIds) {
-                                    selectedIds - session.id
-                                } else {
-                                    selectedIds + session.id
-                                }
+                    items(
+                        visible,
+                        key = {
+                            it.id
                         },
+                    ) { session ->
 
-                        onOpen = {
+                        SessionCard(
+                            session = session,
+                            selected =
+                                session.id in selectedIds,
+                            onSelect = {
 
-                            val updated =
-                                sessions.map {
-
-                                    if (it.id == session.id) {
-                                        it.copy(
-                                            lastOpenedAt =
-                                                System.currentTimeMillis()
-                                        )
+                                selectedIds =
+                                    if (
+                                        session.id in
+                                        selectedIds
+                                    ) {
+                                        selectedIds -
+                                            session.id
                                     } else {
-                                        it
+                                        selectedIds +
+                                            session.id
+                                    }
+                            },
+                            onOpen = {
+
+                                val updated =
+                                    sessions.map {
+
+                                        if (
+                                            it.id ==
+                                            session.id
+                                        ) {
+                                            it.copy(
+                                                lastOpenedAt =
+                                                    System.currentTimeMillis(),
+                                            )
+                                        } else {
+                                            it
+                                        }
+                                    }
+
+                                sessions =
+                                    updated
+
+                                store.save(
+                                    updated,
+                                )
+
+                                selected =
+                                    updated.first {
+                                        it.id ==
+                                            session.id
+                                    }
+                            },
+                            onRename = {
+                                showRename =
+                                    session
+                            },
+                            onDelete = {
+
+                                sessions =
+                                    sessions.filterNot {
+                                        it.id ==
+                                            session.id
+                                    }
+
+                                store.save(
+                                    sessions,
+                                )
+
+                                if (
+                                    WebViewFeature
+                                        .isFeatureSupported(
+                                            WebViewFeature
+                                                .MULTI_PROFILE,
+                                        )
+                                ) {
+                                    runCatching {
+                                        ProfileStore
+                                            .getInstance()
+                                            .deleteProfile(
+                                                session.profileName,
+                                            )
                                     }
                                 }
 
-                            sessions = updated
-                            store.save(updated)
-
-                            selected =
-                                updated.first {
-                                    it.id == session.id
-                                }
-                        },
-
-                        onRename = {
-                            showRename = session
-                        },
-
-                        onDelete = {
-
-                            sessions =
-                                sessions.filterNot {
-                                    it.id == session.id
-                                }
-
-                            store.save(sessions)
-
-                            if (
-                                WebViewFeature.isFeatureSupported(
-                                    WebViewFeature.MULTI_PROFILE
-                                )
-                            ) {
-                                runCatching {
-                                    ProfileStore
-                                        .getInstance()
-                                        .deleteProfile(
-                                            session.profileName
-                                        )
-                                }
-                            }
-                        },
-                    )
+                                selectedIds =
+                                    selectedIds -
+                                        session.id
+                            },
+                        )
+                    }
                 }
+            }
+
+            if (
+                filtered.isNotEmpty()
+            ) {
+                PaginationBar(
+                    page = page,
+                    totalPages =
+                        totalPages,
+                    onPrevious = {
+                        if (
+                            page > 0
+                        ) {
+                            page--
+                        }
+                    },
+                    onNext = {
+                        if (
+                            page <
+                            totalPages - 1
+                        ) {
+                            page++
+                        }
+                    },
+                    onPage = {
+                        page = it
+                    },
+                )
             }
         }
     }
 
     if (showCreate) {
-        CreateSessionDialog(
-            groups = sessions
-                .map { it.group }
-                .filter { it.isNotBlank() }
-                .distinct()
-                .sorted(),
 
+        CreateSessionDialog(
+            groups =
+                groups,
+            suggestedName =
+                "My Session ${
+                    nextSessionNumber(
+                        sessions,
+                    )
+                }",
             onDismiss = {
                 showCreate = false
             },
         ) { name, group ->
 
-            val profileName =
-                "profile_${UUID.randomUUID()}"
+            val finalName =
+                if (
+                    name.isBlank()
+                ) {
+                    "My Session ${
+                        nextSessionNumber(
+                            sessions,
+                        )
+                    }"
+                } else {
+                    name.trim()
+                }
 
-            val meta = SessionMeta(
-                id = UUID.randomUUID().toString(),
-                profileName = profileName,
-                name = name,
-                group = group,
-                createdAt = System.currentTimeMillis(),
+            val meta =
+                SessionMeta(
+                    id =
+                        UUID.randomUUID()
+                            .toString(),
+                    profileName =
+                        "profile_${
+                            UUID.randomUUID()
+                        }",
+                    name = finalName,
+                    group = group,
+                    createdAt =
+                        System.currentTimeMillis(),
+                )
+
+            sessions += meta
+
+            store.save(
+                sessions,
             )
-
-            sessions = sessions + meta
-            store.save(sessions)
 
             selected = meta
             showCreate = false
@@ -718,7 +1238,6 @@ fun BroLikerApp() {
 
         RenameDialog(
             current = current.name,
-
             onDismiss = {
                 showRename = null
             },
@@ -727,47 +1246,58 @@ fun BroLikerApp() {
             sessions =
                 sessions.map {
 
-                    if (it.id == current.id) {
-                        it.copy(name = newName)
+                    if (
+                        it.id ==
+                        current.id
+                    ) {
+                        it.copy(
+                            name =
+                                newName,
+                        )
                     } else {
                         it
                     }
                 }
 
-            store.save(sessions)
+            store.save(
+                sessions,
+            )
+
             showRename = null
         }
     }
 
-    if (showGroup) {
+    if (
+        showGroupManager
+    ) {
 
         GroupManagerDialog(
-            groups = sessions
-                .map { it.group }
-                .filter { it.isNotBlank() }
-                .distinct()
-                .sorted(),
-
+            sessions = sessions,
             onDismiss = {
-                showGroup = false
+                showGroupManager =
+                    false
             },
-
             onFilter = {
                 filter = it
-                showGroup = false
+                showGroupManager =
+                    false
+            },
+            onSave = { updated ->
+                sessions = updated
+                store.save(
+                    updated,
+                )
             },
         )
     }
 
-    if (showBulkGroup) {
+    if (
+        showBulkGroup
+    ) {
 
         BulkGroupDialog(
-            groups = sessions
-                .map { it.group }
-                .filter { it.isNotBlank() }
-                .distinct()
-                .sorted(),
-
+            groups =
+                groups,
             onDismiss = {
                 showBulkGroup = false
             },
@@ -776,18 +1306,285 @@ fun BroLikerApp() {
             sessions =
                 sessions.map {
 
-                    if (it.id in selectedIds) {
-                        it.copy(group = group)
+                    if (
+                        it.id in
+                        selectedIds
+                    ) {
+                        it.copy(
+                            group = group,
+                        )
                     } else {
                         it
                     }
                 }
 
-            store.save(sessions)
+            store.save(
+                sessions,
+            )
 
-            selectedIds = emptySet()
+            selectedIds =
+                emptySet()
 
-            showBulkGroup = false
+            showBulkGroup =
+                false
+        }
+    }
+
+    if (
+        showSettings
+    ) {
+
+        SettingsDialog(
+            onDismiss = {
+                showSettings = false
+            },
+            onExport = {
+
+                exportLauncher.launch(
+                    "bro-liker-backup.json",
+                )
+
+                showSettings = false
+            },
+            onImport = {
+
+                importLauncher.launch(
+                    arrayOf(
+                        "application/json",
+                        "text/plain",
+                        "*/*",
+                    ),
+                )
+
+                showSettings = false
+            },
+            onClearSelection = {
+                selectedIds =
+                    emptySet()
+            },
+        )
+    }
+
+    importMessage?.let { message ->
+
+        AlertDialog(
+            onDismissRequest = {
+                importMessage = null
+            },
+            title = {
+                Text("Backup")
+            },
+            text = {
+                Text(message)
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        importMessage =
+                            null
+                    },
+                ) {
+                    Text("OK")
+                }
+            },
+        )
+    }
+}
+
+@Composable
+private fun LazyGroupRow(
+    groups: List<String>,
+    selectedGroup: String,
+    onSelect: (String) -> Unit,
+) {
+    androidx.compose.foundation.lazy.LazyRow(
+        horizontalArrangement =
+            Arrangement.spacedBy(8.dp),
+        contentPadding =
+            PaddingValues(
+                horizontal = 2.dp,
+            ),
+    ) {
+
+        items(
+            groups,
+            key = {
+                it
+            },
+        ) { group ->
+
+            FilterChip(
+                selected =
+                    selectedGroup ==
+                        group,
+                onClick = {
+                    onSelect(group)
+                },
+                label = {
+                    Text(
+                        group,
+                        maxLines = 1,
+                        overflow =
+                            TextOverflow.Ellipsis,
+                    )
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun PaginationBar(
+    page: Int,
+    totalPages: Int,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+    onPage: (Int) -> Unit,
+) {
+    Surface(
+        modifier =
+            Modifier.fillMaxWidth(),
+        tonalElevation = 2.dp,
+        shape =
+            RoundedCornerShape(12.dp),
+    ) {
+
+        Row(
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .padding(
+                        horizontal = 8.dp,
+                        vertical = 6.dp,
+                    ),
+            verticalAlignment =
+                Alignment.CenterVertically,
+        ) {
+
+            IconButton(
+                enabled =
+                    page > 0,
+                onClick =
+                    onPrevious,
+            ) {
+                Icon(
+                    Icons.Default.ArrowBackIosNew,
+                    contentDescription =
+                        "Previous page",
+                )
+            }
+
+            Spacer(
+                Modifier.width(2.dp),
+            )
+
+            PageNumbers(
+                current =
+                    page,
+                total =
+                    totalPages,
+                onPage =
+                    onPage,
+            )
+
+            Spacer(
+                Modifier.weight(1f),
+            )
+
+            IconButton(
+                enabled =
+                    page <
+                        totalPages - 1,
+                onClick =
+                    onNext,
+            ) {
+                Icon(
+                    Icons.Default.ArrowForwardIos,
+                    contentDescription =
+                        "Next page",
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PageNumbers(
+    current: Int,
+    total: Int,
+    onPage: (Int) -> Unit,
+) {
+    val numbers =
+        when {
+            total <= 5 ->
+                (0 until total).toList()
+
+            current <= 2 ->
+                listOf(
+                    0,
+                    1,
+                    2,
+                    3,
+                    -1,
+                    total - 1,
+                )
+
+            current >= total - 3 ->
+                listOf(
+                    0,
+                    -1,
+                    total - 4,
+                    total - 3,
+                    total - 2,
+                    total - 1,
+                )
+
+            else ->
+                listOf(
+                    0,
+                    -1,
+                    current - 1,
+                    current,
+                    current + 1,
+                    -1,
+                    total - 1,
+                )
+        }
+
+    Row(
+        horizontalArrangement =
+            Arrangement.spacedBy(2.dp),
+    ) {
+
+        numbers.forEach { number ->
+
+            if (number == -1) {
+
+                Text(
+                    "...",
+                    modifier =
+                        Modifier.padding(
+                            horizontal = 5.dp,
+                            vertical = 10.dp,
+                        ),
+                )
+
+            } else {
+
+                FilterChip(
+                    selected =
+                        current ==
+                            number,
+                    onClick = {
+                        onPage(number)
+                    },
+                    label = {
+                        Text(
+                            "${number + 1}",
+                        )
+                    },
+                )
+            }
         }
     }
 }
@@ -802,21 +1599,20 @@ private fun SessionCard(
     onDelete: () -> Unit,
 ) {
     Card(
-        Modifier.fillMaxWidth()
+        Modifier.fillMaxWidth(),
     ) {
 
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(12.dp),
-
+                .padding(10.dp),
             verticalAlignment =
                 Alignment.CenterVertically,
         ) {
 
             Checkbox(
-                checked = selected,
-
+                checked =
+                    selected,
                 onCheckedChange = {
                     onSelect()
                 },
@@ -824,89 +1620,102 @@ private fun SessionCard(
 
             Box(
                 Modifier
-                    .size(40.dp)
+                    .size(42.dp)
                     .background(
-                        MaterialTheme.colorScheme.primaryContainer,
-                        RoundedCornerShape(12.dp),
+                        MaterialTheme
+                            .colorScheme
+                            .primaryContainer,
+                        RoundedCornerShape(
+                            12.dp,
+                        ),
                     ),
-
                 contentAlignment =
                     Alignment.Center,
             ) {
 
                 Text(
                     "F",
-
                     color =
                         MaterialTheme
                             .colorScheme
                             .primary,
-
                     fontWeight =
                         FontWeight.Bold,
                 )
             }
 
             Spacer(
-                Modifier.size(10.dp)
+                Modifier.width(10.dp),
             )
 
             Column(
-                Modifier.weight(1f)
+                Modifier.weight(1f),
             ) {
 
                 Text(
                     session.name,
-
                     style =
                         MaterialTheme
                             .typography
                             .titleMedium,
-
                     fontWeight =
                         FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow =
+                        TextOverflow.Ellipsis,
                 )
 
                 Text(
-                    if (session.group.isBlank()) {
+                    if (
+                        session.group
+                            .isBlank()
+                    ) {
                         "Ungrouped"
                     } else {
                         session.group
                     },
-
                     style =
                         MaterialTheme
                             .typography
                             .bodySmall,
-
                     color =
                         MaterialTheme
                             .colorScheme
                             .onSurfaceVariant,
+                    maxLines = 1,
+                    overflow =
+                        TextOverflow.Ellipsis,
                 )
             }
 
             TextButton(
-                onClick = onOpen
+                onClick =
+                    onOpen,
             ) {
-                Text("Open")
-            }
-
-            IconButton(
-                onClick = onRename
-            ) {
-                Icon(
-                    Icons.Default.Edit,
-                    contentDescription = "Rename",
+                Text(
+                    "Open",
                 )
             }
 
             IconButton(
-                onClick = onDelete
+                onClick =
+                    onRename,
+            ) {
+                Icon(
+                    Icons.Default.Edit,
+                    contentDescription =
+                        "Rename",
+                )
+            }
+
+            IconButton(
+                onClick =
+                    onDelete,
             ) {
                 Icon(
                     Icons.Default.Delete,
-                    contentDescription = "Delete",
+                    contentDescription =
+                        "Delete",
                 )
             }
         }
@@ -916,73 +1725,97 @@ private fun SessionCard(
 @Composable
 private fun CreateSessionDialog(
     groups: List<String>,
+    suggestedName: String,
     onDismiss: () -> Unit,
-    onCreate: (String, String) -> Unit,
+    onCreate: (
+        String,
+        String,
+    ) -> Unit,
 ) {
     var name by remember {
         mutableStateOf(
-            "Session ${System.currentTimeMillis() % 100000}"
+            suggestedName,
         )
     }
 
     var group by remember {
-        mutableStateOf("")
+        mutableStateOf(
+            "",
+        )
     }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest =
+            onDismiss,
 
         title = {
-            Text("Create new session")
+            Text(
+                "Create new session",
+            )
         },
 
         text = {
 
             Column(
                 verticalArrangement =
-                    Arrangement.spacedBy(10.dp)
+                    Arrangement.spacedBy(
+                        10.dp,
+                    ),
             ) {
 
                 OutlinedTextField(
-                    name,
-                    {
+                    value =
+                        name,
+                    onValueChange = {
                         name = it
                     },
-
+                    modifier =
+                        Modifier.fillMaxWidth(),
                     label = {
-                        Text("Session name")
+                        Text(
+                            "Session name",
+                        )
                     },
-
                     singleLine = true,
                 )
 
                 OutlinedTextField(
-                    group,
-                    {
+                    value =
+                        group,
+                    onValueChange = {
                         group = it
                     },
-
+                    modifier =
+                        Modifier.fillMaxWidth(),
                     label = {
                         Text(
-                            if (groups.isEmpty()) {
-                                "Group (optional)"
-                            } else {
-                                "Group"
-                            }
+                            "Group (optional)",
                         )
                     },
-
                     singleLine = true,
                 )
 
-                Text(
-                    "Each session gets its own persistent browser profile.",
+                if (
+                    groups.isNotEmpty()
+                ) {
 
+                    LazyGroupRow(
+                        groups =
+                            groups,
+                        selectedGroup =
+                            group,
+                        onSelect = {
+                            group = it
+                        },
+                    )
+                }
+
+                Text(
+                    "Every session uses its own persistent browser profile.",
                     style =
                         MaterialTheme
                             .typography
                             .bodySmall,
-
                     color =
                         MaterialTheme
                             .colorScheme
@@ -994,8 +1827,8 @@ private fun CreateSessionDialog(
         confirmButton = {
 
             Button(
-                enabled = name.isNotBlank(),
-
+                enabled =
+                    name.isNotBlank(),
                 onClick = {
                     onCreate(
                         name.trim(),
@@ -1003,16 +1836,21 @@ private fun CreateSessionDialog(
                     )
                 },
             ) {
-                Text("Create & Open")
+                Text(
+                    "Create & Open",
+                )
             }
         },
 
         dismissButton = {
 
             TextButton(
-                onClick = onDismiss
+                onClick =
+                    onDismiss,
             ) {
-                Text("Cancel")
+                Text(
+                    "Cancel",
+                )
             }
         },
     )
@@ -1022,31 +1860,41 @@ private fun CreateSessionDialog(
 private fun RenameDialog(
     current: String,
     onDismiss: () -> Unit,
-    onSave: (String) -> Unit,
+    onSave: (
+        String,
+    ) -> Unit,
 ) {
     var value by remember {
-        mutableStateOf(current)
+        mutableStateOf(
+            current,
+        )
     }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest =
+            onDismiss,
 
         title = {
-            Text("Rename session")
+            Text(
+                "Rename session",
+            )
         },
 
         text = {
 
             OutlinedTextField(
-                value,
-                {
+                value =
+                    value,
+                onValueChange = {
                     value = it
                 },
-
+                modifier =
+                    Modifier.fillMaxWidth(),
                 singleLine = true,
-
                 label = {
-                    Text("Name")
+                    Text(
+                        "Name",
+                    )
                 },
             )
         },
@@ -1054,22 +1902,29 @@ private fun RenameDialog(
         confirmButton = {
 
             Button(
-                enabled = value.isNotBlank(),
-
+                enabled =
+                    value.isNotBlank(),
                 onClick = {
-                    onSave(value.trim())
+                    onSave(
+                        value.trim(),
+                    )
                 },
             ) {
-                Text("Save")
+                Text(
+                    "Save",
+                )
             }
         },
 
         dismissButton = {
 
             TextButton(
-                onClick = onDismiss
+                onClick =
+                    onDismiss,
             ) {
-                Text("Cancel")
+                Text(
+                    "Cancel",
+                )
             }
         },
     )
@@ -1077,45 +1932,273 @@ private fun RenameDialog(
 
 @Composable
 private fun GroupManagerDialog(
-    groups: List<String>,
+    sessions: List<SessionMeta>,
     onDismiss: () -> Unit,
-    onFilter: (String) -> Unit,
+    onFilter: (
+        String,
+    ) -> Unit,
+    onSave: (
+        List<SessionMeta>,
+    ) -> Unit,
 ) {
+    var showCreate by remember {
+        mutableStateOf(false)
+    }
+
+    var renameTarget by remember {
+        mutableStateOf<String?>(null)
+    }
+
+    var newGroupName by remember {
+        mutableStateOf("")
+    }
+
+    val groups =
+        sessions
+            .map {
+                it.group.trim()
+            }
+            .filter {
+                it.isNotBlank()
+            }
+            .distinct()
+            .sorted()
+
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest =
+            onDismiss,
 
         title = {
-            Text("Groups")
+
+            Row(
+                modifier =
+                    Modifier.fillMaxWidth(),
+                verticalAlignment =
+                    Alignment.CenterVertically,
+            ) {
+
+                Column(
+                    Modifier.weight(1f),
+                ) {
+
+                    Text(
+                        "Groups",
+                        fontWeight =
+                            FontWeight.Bold,
+                    )
+
+                    Text(
+                        "${groups.size} groups",
+                        style =
+                            MaterialTheme
+                                .typography
+                                .labelSmall,
+                    )
+                }
+
+                IconButton(
+                    onClick = {
+                        showCreate = true
+                    },
+                ) {
+                    Icon(
+                        Icons.Default.Add,
+                        contentDescription =
+                            "Create group",
+                    )
+                }
+            }
         },
 
         text = {
 
-            Column {
+            if (
+                groups.isEmpty()
+            ) {
 
-                TextButton(
-                    onClick = {
-                        onFilter("All")
-                    }
-                ) {
-                    Text("All sessions")
-                }
+                Column {
 
-                TextButton(
-                    onClick = {
-                        onFilter("Ungrouped")
-                    }
-                ) {
-                    Text("Ungrouped")
-                }
+                    Text(
+                        "No groups created yet.",
+                    )
 
-                groups.forEach { group ->
+                    Spacer(
+                        Modifier.height(10.dp),
+                    )
 
-                    TextButton(
+                    Button(
                         onClick = {
-                            onFilter(group)
-                        }
+                            showCreate = true
+                        },
                     ) {
-                        Text(group)
+                        Text(
+                            "Create first group",
+                        )
+                    }
+                }
+
+            } else {
+
+                LazyColumn(
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .height(360.dp),
+                    verticalArrangement =
+                        Arrangement.spacedBy(
+                            6.dp,
+                        ),
+                ) {
+
+                    item {
+
+                        OutlinedButton(
+                            onClick = {
+                                onFilter(
+                                    "All",
+                                )
+                            },
+                        ) {
+
+                            Icon(
+                                Icons.Default.Folder,
+                                null,
+                            )
+
+                            Spacer(
+                                Modifier.width(
+                                    6.dp,
+                                ),
+                            )
+
+                            Text(
+                                "All Sessions",
+                            )
+                        }
+                    }
+
+                    item {
+
+                        HorizontalDivider()
+                    }
+
+                    items(
+                        groups,
+                        key = {
+                            it
+                        },
+                    ) { group ->
+
+                        val count =
+                            sessions.count {
+                                it.group ==
+                                    group &&
+                                    !it.archived
+                            }
+
+                        Card(
+                            modifier =
+                                Modifier.fillMaxWidth(),
+                        ) {
+
+                            Row(
+                                modifier =
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .padding(
+                                            8.dp,
+                                        ),
+                                verticalAlignment =
+                                    Alignment.CenterVertically,
+                            ) {
+
+                                Column(
+                                    Modifier.weight(
+                                        1f,
+                                    ),
+                                ) {
+
+                                    Text(
+                                        group,
+                                        fontWeight =
+                                            FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow =
+                                            TextOverflow
+                                                .Ellipsis,
+                                    )
+
+                                    Text(
+                                        "$count sessions",
+                                        style =
+                                            MaterialTheme
+                                                .typography
+                                                .labelSmall,
+                                        color =
+                                            MaterialTheme
+                                                .colorScheme
+                                                .onSurfaceVariant,
+                                    )
+                                }
+
+                                TextButton(
+                                    onClick = {
+                                        onFilter(
+                                            group,
+                                        )
+                                    },
+                                ) {
+                                    Text(
+                                        "Open",
+                                    )
+                                }
+
+                                IconButton(
+                                    onClick = {
+                                        renameTarget =
+                                            group
+                                        newGroupName =
+                                            group
+                                    },
+                                ) {
+                                    Icon(
+                                        Icons.Default.Edit,
+                                        contentDescription =
+                                            "Rename group",
+                                    )
+                                }
+
+                                IconButton(
+                                    onClick = {
+
+                                        val updated =
+                                            sessions.map {
+                                                if (
+                                                    it.group ==
+                                                    group
+                                                ) {
+                                                    it.copy(
+                                                        group =
+                                                            "",
+                                                    )
+                                                } else {
+                                                    it
+                                                }
+                                            }
+
+                                        onSave(
+                                            updated,
+                                        )
+                                    },
+                                ) {
+                                    Icon(
+                                        Icons.Default.Delete,
+                                        contentDescription =
+                                            "Delete group",
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1124,73 +2207,210 @@ private fun GroupManagerDialog(
         confirmButton = {
 
             TextButton(
-                onClick = onDismiss
+                onClick =
+                    onDismiss,
             ) {
-                Text("Close")
+                Text(
+                    "Close",
+                )
             }
         },
     )
+
+    if (
+        showCreate ||
+        renameTarget != null
+    ) {
+
+        AlertDialog(
+            onDismissRequest = {
+                showCreate = false
+                renameTarget = null
+            },
+
+            title = {
+                Text(
+                    if (
+                        renameTarget !=
+                        null
+                    ) {
+                        "Rename group"
+                    } else {
+                        "Create group"
+                    },
+                )
+            },
+
+            text = {
+
+                OutlinedTextField(
+                    value =
+                        newGroupName,
+                    onValueChange = {
+                        newGroupName = it
+                    },
+                    modifier =
+                        Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = {
+                        Text(
+                            "Group name",
+                        )
+                    },
+                )
+            },
+
+            confirmButton = {
+
+                Button(
+                    enabled =
+                        newGroupName
+                            .isNotBlank(),
+
+                    onClick = {
+
+                        val clean =
+                            newGroupName
+                                .trim()
+
+                        if (
+                            renameTarget !=
+                            null
+                        ) {
+
+                            val updated =
+                                sessions.map {
+
+                                    if (
+                                        it.group ==
+                                        renameTarget
+                                    ) {
+                                        it.copy(
+                                            group =
+                                                clean,
+                                        )
+                                    } else {
+                                        it
+                                    }
+                                }
+
+                            onSave(
+                                updated,
+                            )
+
+                        } else {
+
+                            // Group exists as soon as
+                            // a session is assigned to it.
+                            // For immediate creation, add
+                            // no fake session.
+                        }
+
+                        newGroupName = ""
+                        showCreate = false
+                        renameTarget = null
+                    },
+                ) {
+                    Text(
+                        if (
+                            renameTarget !=
+                            null
+                        ) {
+                            "Rename"
+                        } else {
+                            "Create",
+                        },
+                    )
+                }
+            },
+
+            dismissButton = {
+
+                TextButton(
+                    onClick = {
+                        showCreate = false
+                        renameTarget = null
+                    },
+                ) {
+                    Text(
+                        "Cancel",
+                    )
+                }
+            },
+        )
+    }
 }
 
 @Composable
 private fun BulkGroupDialog(
     groups: List<String>,
     onDismiss: () -> Unit,
-    onApply: (String) -> Unit,
+    onApply: (
+        String,
+    ) -> Unit,
 ) {
     var group by remember {
-        mutableStateOf("")
+        mutableStateOf(
+            "",
+        )
     }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest =
+            onDismiss,
 
         title = {
-            Text("Move selected sessions")
+            Text(
+                "Move selected sessions",
+            )
         },
 
         text = {
 
             Column(
                 verticalArrangement =
-                    Arrangement.spacedBy(8.dp)
+                    Arrangement.spacedBy(
+                        8.dp,
+                    ),
             ) {
 
                 OutlinedTextField(
-                    value = group,
-
+                    value =
+                        group,
                     onValueChange = {
                         group = it
                     },
-
-                    label = {
-                        Text("Group name")
-                    },
-
+                    modifier =
+                        Modifier.fillMaxWidth(),
                     singleLine = true,
+                    label = {
+                        Text(
+                            "Group name",
+                        )
+                    },
                 )
 
-                if (groups.isNotEmpty()) {
+                if (
+                    groups.isNotEmpty()
+                ) {
 
                     Text(
                         "Existing groups",
-
                         style =
                             MaterialTheme
                                 .typography
                                 .labelMedium,
                     )
 
-                    groups.forEach { existing ->
-
-                        TextButton(
-                            onClick = {
-                                group = existing
-                            }
-                        ) {
-                            Text(existing)
-                        }
-                    }
+                    LazyGroupRow(
+                        groups =
+                            groups,
+                        selectedGroup =
+                            group,
+                        onSelect = {
+                            group = it
+                        },
+                    )
                 }
             }
         },
@@ -1198,22 +2418,159 @@ private fun BulkGroupDialog(
         confirmButton = {
 
             Button(
-                enabled = group.isNotBlank(),
-
+                enabled =
+                    group.isNotBlank(),
                 onClick = {
-                    onApply(group.trim())
+                    onApply(
+                        group.trim(),
+                    )
                 },
             ) {
-                Text("Move")
+                Text(
+                    "Move",
+                )
             }
         },
 
         dismissButton = {
 
             TextButton(
-                onClick = onDismiss
+                onClick =
+                    onDismiss,
             ) {
-                Text("Cancel")
+                Text(
+                    "Cancel",
+                )
+            }
+        },
+    )
+}
+
+@Composable
+private fun SettingsDialog(
+    onDismiss: () -> Unit,
+    onExport: () -> Unit,
+    onImport: () -> Unit,
+    onClearSelection: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest =
+            onDismiss,
+
+        title = {
+            Row(
+                verticalAlignment =
+                    Alignment.CenterVertically,
+            ) {
+
+                Icon(
+                    Icons.Default.Settings,
+                    null,
+                )
+
+                Spacer(
+                    Modifier.width(
+                        8.dp,
+                    ),
+                )
+
+                Text(
+                    "Settings",
+                    fontWeight =
+                        FontWeight.Bold,
+                )
+            }
+        },
+
+        text = {
+
+            Column(
+                verticalArrangement =
+                    Arrangement.spacedBy(
+                        10.dp,
+                    ),
+            ) {
+
+                Button(
+                    modifier =
+                        Modifier.fillMaxWidth(),
+                    onClick =
+                        onExport,
+                ) {
+
+                    Icon(
+                        Icons.Default.FileDownload,
+                        null,
+                    )
+
+                    Spacer(
+                        Modifier.width(
+                            8.dp,
+                        ),
+                    )
+
+                    Text(
+                        "Export Sessions",
+                    )
+                }
+
+                Button(
+                    modifier =
+                        Modifier.fillMaxWidth(),
+                    onClick =
+                        onImport,
+                ) {
+
+                    Icon(
+                        Icons.Default.FileUpload,
+                        null,
+                    )
+
+                    Spacer(
+                        Modifier.width(
+                            8.dp,
+                        ),
+                    )
+
+                    Text(
+                        "Import Sessions",
+                    )
+                }
+
+                OutlinedButton(
+                    modifier =
+                        Modifier.fillMaxWidth(),
+                    onClick =
+                        onClearSelection,
+                ) {
+                    Text(
+                        "Clear Selection",
+                    )
+                }
+
+                Text(
+                    "Export/Import contains session metadata and group information only. Login credentials and authentication cookies are not included.",
+                    style =
+                        MaterialTheme
+                            .typography
+                            .bodySmall,
+                    color =
+                        MaterialTheme
+                            .colorScheme
+                            .onSurfaceVariant,
+                )
+            }
+        },
+
+        confirmButton = {
+
+            TextButton(
+                onClick =
+                    onDismiss,
+            ) {
+                Text(
+                    "Close",
+                )
             }
         },
     )
@@ -1227,8 +2584,6 @@ private fun BrowserScreen(
     onBack: () -> Unit,
     onCreateAnother: () -> Unit,
 ) {
-    val context = LocalContext.current
-
     var rootRef by remember {
         mutableStateOf<FrameLayout?>(null)
     }
@@ -1250,11 +2605,15 @@ private fun BrowserScreen(
     }
 
     var currentUrl by remember {
-        mutableStateOf(HOME_URL)
+        mutableStateOf(
+            HOME_URL,
+        )
     }
 
     var urlBarText by remember {
-        mutableStateOf(HOME_URL)
+        mutableStateOf(
+            HOME_URL,
+        )
     }
 
     var loadingProgress by remember {
@@ -1269,84 +2628,117 @@ private fun BrowserScreen(
         mutableStateOf<String?>(null)
     }
 
-    var pageTitle by remember {
-        mutableStateOf("Facebook")
-    }
+    val multiProfileSupported =
+        remember {
+            WebViewFeature
+                .isFeatureSupported(
+                    WebViewFeature
+                        .MULTI_PROFILE,
+                )
+        }
 
-    val multiProfileSupported = remember {
-        WebViewFeature.isFeatureSupported(
-            WebViewFeature.MULTI_PROFILE
-        )
-    }
-
-    fun profileStore(): ProfileStore {
-        return ProfileStore.getInstance()
-    }
+    fun profileStore():
+        ProfileStore =
+        ProfileStore.getInstance()
 
     fun configureProfile(
-        webView: WebView
+        webView: WebView,
     ) {
 
-        if (multiProfileSupported) {
+        if (
+            multiProfileSupported
+        ) {
 
             runCatching {
 
                 profileStore()
                     .getOrCreateProfile(
-                        session.profileName
+                        session.profileName,
                     )
 
                 WebViewCompat.setProfile(
                     webView,
-                    session.profileName
+                    session.profileName,
                 )
             }
         }
 
         webView.settings.apply {
 
-            javaScriptEnabled = true
-            domStorageEnabled = true
-            databaseEnabled = true
+            javaScriptEnabled =
+                true
 
-            javaScriptCanOpenWindowsAutomatically = true
+            domStorageEnabled =
+                true
 
-            setSupportMultipleWindows(true)
+            databaseEnabled =
+                true
 
-            loadsImagesAutomatically = true
+            javaScriptCanOpenWindowsAutomatically =
+                true
 
-            blockNetworkImage = false
-            blockNetworkLoads = false
+            setSupportMultipleWindows(
+                true,
+            )
 
-            useWideViewPort = true
-            loadWithOverviewMode = true
+            loadsImagesAutomatically =
+                true
 
-            builtInZoomControls = true
-            displayZoomControls = false
-            setSupportZoom(true)
+            blockNetworkImage =
+                false
 
-            allowFileAccess = true
-            allowContentAccess = true
+            blockNetworkLoads =
+                false
+
+            useWideViewPort =
+                true
+
+            loadWithOverviewMode =
+                true
+
+            builtInZoomControls =
+                true
+
+            displayZoomControls =
+                false
+
+            setSupportZoom(
+                true,
+            )
+
+            allowFileAccess =
+                true
+
+            allowContentAccess =
+                true
 
             mixedContentMode =
-                WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                WebSettings
+                    .MIXED_CONTENT_COMPATIBILITY_MODE
 
-            mediaPlaybackRequiresUserGesture = false
+            mediaPlaybackRequiresUserGesture =
+                false
 
             cacheMode =
                 WebSettings.LOAD_DEFAULT
         }
 
-        if (multiProfileSupported) {
+        if (
+            multiProfileSupported
+        ) {
 
             runCatching {
 
                 profileStore()
-                    .getProfile(session.profileName)
+                    .getProfile(
+                        session.profileName,
+                    )
                     ?.cookieManager
                     ?.apply {
 
-                        setAcceptCookie(true)
+                        setAcceptCookie(
+                            true,
+                        )
 
                         setAcceptThirdPartyCookies(
                             webView,
@@ -1361,24 +2753,30 @@ private fun BrowserScreen(
                 .getInstance()
                 .apply {
 
-                    setAcceptCookie(true)
+                    setAcceptCookie(
+                        true,
+                    )
 
                     setAcceptThirdPartyCookies(
                         webView,
                         true,
                     )
-                }
+            }
         }
     }
 
     fun flushProfileCookies() {
 
-        if (multiProfileSupported) {
+        if (
+            multiProfileSupported
+        ) {
 
             runCatching {
 
                 profileStore()
-                    .getProfile(session.profileName)
+                    .getProfile(
+                        session.profileName,
+                    )
                     ?.cookieManager
                     ?.flush()
             }
@@ -1392,17 +2790,15 @@ private fun BrowserScreen(
     }
 
     fun makeClient(
-        webView: WebView
-    ): WebViewClient {
-
-        return object : WebViewClient() {
+        webView: WebView,
+    ): WebViewClient =
+        object : WebViewClient() {
 
             override fun shouldOverrideUrlLoading(
                 view: WebView,
                 request: WebResourceRequest,
-            ): Boolean {
-                return false
-            }
+            ): Boolean =
+                false
 
             override fun onPageStarted(
                 view: WebView,
@@ -1410,13 +2806,23 @@ private fun BrowserScreen(
                 favicon: Bitmap?,
             ) {
 
-                currentUrl = url
-                urlBarText = url
-                isLoading = true
-                errorMsg = null
+                currentUrl =
+                    url
 
-                canBack = view.canGoBack()
-                canForward = view.canGoForward()
+                urlBarText =
+                    url
+
+                isLoading =
+                    true
+
+                errorMsg =
+                    null
+
+                canBack =
+                    view.canGoBack()
+
+                canForward =
+                    view.canGoForward()
             }
 
             override fun onPageFinished(
@@ -1424,13 +2830,20 @@ private fun BrowserScreen(
                 url: String,
             ) {
 
-                currentUrl = url
-                urlBarText = url
+                currentUrl =
+                    url
 
-                isLoading = false
+                urlBarText =
+                    url
 
-                canBack = view.canGoBack()
-                canForward = view.canGoForward()
+                isLoading =
+                    false
+
+                canBack =
+                    view.canGoBack()
+
+                canForward =
+                    view.canGoForward()
 
                 flushProfileCookies()
             }
@@ -1441,9 +2854,12 @@ private fun BrowserScreen(
                 error: WebResourceError,
             ) {
 
-                if (request.isForMainFrame) {
+                if (
+                    request.isForMainFrame
+                ) {
 
-                    isLoading = false
+                    isLoading =
+                        false
 
                     errorMsg =
                         "Error ${error.errorCode}: ${error.description}"
@@ -1455,10 +2871,13 @@ private fun BrowserScreen(
                 detail: android.webkit.RenderProcessGoneDetail,
             ): Boolean {
 
-                isLoading = false
+                isLoading =
+                    false
 
                 errorMsg =
-                    if (detail.didCrash()) {
+                    if (
+                        detail.didCrash()
+                    ) {
                         "WebView renderer crashed. Tap Reload."
                     } else {
                         "WebView renderer stopped. Tap Reload."
@@ -1467,20 +2886,19 @@ private fun BrowserScreen(
                 return true
             }
         }
-    }
 
     fun makeChromeClient(
-        webView: WebView
-    ): WebChromeClient {
-
-        return object : WebChromeClient() {
+        webView: WebView,
+    ): WebChromeClient =
+        object : WebChromeClient() {
 
             override fun onProgressChanged(
                 view: WebView,
                 newProgress: Int,
             ) {
 
-                loadingProgress = newProgress
+                loadingProgress =
+                    newProgress
 
                 isLoading =
                     newProgress < 100
@@ -1492,16 +2910,6 @@ private fun BrowserScreen(
                     view.canGoForward()
             }
 
-            override fun onReceivedTitle(
-                view: WebView,
-                title: String,
-            ) {
-
-                if (title.isNotBlank()) {
-                    pageTitle = title
-                }
-            }
-
             override fun onCreateWindow(
                 view: WebView,
                 isDialog: Boolean,
@@ -1510,18 +2918,27 @@ private fun BrowserScreen(
             ): Boolean {
 
                 val root =
-                    rootRef ?: return false
+                    rootRef
+                        ?: return false
 
                 val child =
-                    WebView(view.context)
+                    WebView(
+                        view.context,
+                    )
 
-                configureProfile(child)
+                configureProfile(
+                    child,
+                )
 
                 child.webViewClient =
-                    makeClient(child)
+                    makeClient(
+                        child,
+                    )
 
                 child.webChromeClient =
-                    makeChromeClient(child)
+                    makeChromeClient(
+                        child,
+                    )
 
                 child.layoutParams =
                     FrameLayout.LayoutParams(
@@ -1529,34 +2946,41 @@ private fun BrowserScreen(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                     )
 
-                activeWebView?.visibility =
+                activeWebView
+                    ?.visibility =
                     android.view.View.GONE
 
-                root.addView(child)
+                root.addView(
+                    child,
+                )
 
-                activeWebView = child
+                activeWebView =
+                    child
 
                 val transport =
-                    resultMsg.obj as? WebView.WebViewTransport
+                    resultMsg.obj
+                        as? WebView.WebViewTransport
                         ?: return false
 
-                transport.webView = child
+                transport.webView =
+                    child
 
                 resultMsg.sendToTarget()
 
                 return true
             }
         }
-    }
 
     fun navigateTo(
-        input: String
+        input: String,
     ) {
 
         val trimmed =
             input.trim()
 
-        if (trimmed.isBlank()) {
+        if (
+            trimmed.isBlank()
+        ) {
             return
         }
 
@@ -1570,52 +2994,58 @@ private fun BrowserScreen(
                     trimmed.startsWith(
                         "http://",
                         true,
-                    ) -> {
+                    ) ->
                     trimmed
-                }
 
-                trimmed.contains(".") -> {
+                trimmed.contains(
+                    ".",
+                ) ->
                     "https://$trimmed"
-                }
 
-                else -> {
-
+                else ->
                     "https://www.google.com/search?q=" +
-                        URLEncoder.encode(
+                        java.net.URLEncoder.encode(
                             trimmed,
                             "UTF-8",
                         )
-                }
             }
 
-        activeWebView?.loadUrl(url)
+        activeWebView
+            ?.loadUrl(
+                url,
+            )
 
-        urlBarText = url
+        urlBarText =
+            url
     }
 
-    fun closePopupIfPossible(): Boolean {
+    fun closePopupIfPossible():
+        Boolean {
 
         val root =
-            rootRef ?: return false
+            rootRef
+                ?: return false
 
         val current =
-            activeWebView ?: return false
+            activeWebView
+                ?: return false
 
-        val children =
-            root.childCount
-
-        if (children <= 1) {
+        if (
+            root.childCount <= 1
+        ) {
             return false
         }
 
-        root.removeView(current)
+        root.removeView(
+            current,
+        )
 
         current.stopLoading()
         current.destroy()
 
         val parent =
             root.getChildAt(
-                root.childCount - 1
+                root.childCount - 1,
             ) as? WebView
 
         parent?.let {
@@ -1623,7 +3053,8 @@ private fun BrowserScreen(
             it.visibility =
                 android.view.View.VISIBLE
 
-            activeWebView = it
+            activeWebView =
+                it
 
             canBack =
                 it.canGoBack()
@@ -1632,7 +3063,8 @@ private fun BrowserScreen(
                 it.canGoForward()
 
             currentUrl =
-                it.url ?: HOME_URL
+                it.url
+                    ?: HOME_URL
 
             urlBarText =
                 currentUrl
@@ -1664,12 +3096,13 @@ private fun BrowserScreen(
 
                                     onBack()
                                 }
-                            }
+                            },
                         ) {
 
                             Icon(
                                 Icons.Default.ArrowBack,
-                                contentDescription = "Close",
+                                contentDescription =
+                                    "Close",
                             )
                         }
                     },
@@ -1677,38 +3110,34 @@ private fun BrowserScreen(
                     title = {
 
                         OutlinedTextField(
-                            value = urlBarText,
-
+                            value =
+                                urlBarText,
                             onValueChange = {
-                                urlBarText = it
+                                urlBarText =
+                                    it
                             },
-
                             modifier =
                                 Modifier.fillMaxWidth(),
-
-                            singleLine = true,
-
+                            singleLine =
+                                true,
                             placeholder = {
                                 Text(
-                                    "URL or search..."
+                                    "URL or search...",
                                 )
                             },
-
                             keyboardOptions =
                                 KeyboardOptions(
                                     imeAction =
-                                        ImeAction.Go
+                                        ImeAction.Go,
                                 ),
-
                             keyboardActions =
                                 KeyboardActions(
                                     onGo = {
                                         navigateTo(
-                                            urlBarText
+                                            urlBarText,
                                         )
-                                    }
+                                    },
                                 ),
-
                             textStyle =
                                 MaterialTheme
                                     .typography
@@ -1720,195 +3149,141 @@ private fun BrowserScreen(
 
                         IconButton(
                             onClick = {
+                                errorMsg =
+                                    null
 
-                                errorMsg = null
-
-                                activeWebView?.reload()
-                            }
+                                activeWebView
+                                    ?.reload()
+                            },
                         ) {
 
                             Icon(
                                 Icons.Default.Refresh,
-                                contentDescription = "Reload",
+                                contentDescription =
+                                    "Reload",
                             )
                         }
 
                         IconButton(
                             onClick = {
-                                showMenu = true
-                            }
+                                showMenu =
+                                    true
+                            },
                         ) {
 
                             Icon(
                                 Icons.Default.MoreVert,
-                                contentDescription = "More",
+                                contentDescription =
+                                    "More",
                             )
                         }
 
                         DropdownMenu(
-
-                            expanded = showMenu,
-
+                            expanded =
+                                showMenu,
                             onDismissRequest = {
-                                showMenu = false
+                                showMenu =
+                                    false
                             },
                         ) {
 
                             DropdownMenuItem(
-
                                 text = {
-                                    Text("Back")
+                                    Text(
+                                        "Back",
+                                    )
                                 },
-
-                                enabled = canBack,
-
+                                enabled =
+                                    canBack,
                                 leadingIcon = {
                                     Icon(
                                         Icons.Default.ArrowBack,
                                         null,
                                     )
                                 },
-
                                 onClick = {
+                                    activeWebView
+                                        ?.goBack()
 
-                                    activeWebView?.goBack()
-
-                                    showMenu = false
+                                    showMenu =
+                                        false
                                 },
                             )
 
                             DropdownMenuItem(
-
                                 text = {
-                                    Text("Forward")
+                                    Text(
+                                        "Forward",
+                                    )
                                 },
-
-                                enabled = canForward,
-
+                                enabled =
+                                    canForward,
                                 leadingIcon = {
                                     Icon(
                                         Icons.Default.ArrowForward,
                                         null,
                                     )
                                 },
-
                                 onClick = {
+                                    activeWebView
+                                        ?.goForward()
 
-                                    activeWebView?.goForward()
-
-                                    showMenu = false
+                                    showMenu =
+                                        false
                                 },
                             )
 
                             DropdownMenuItem(
-
                                 text = {
-                                    Text("Facebook Home")
+                                    Text(
+                                        "Facebook Home",
+                                    )
                                 },
-
                                 leadingIcon = {
                                     Icon(
                                         Icons.Default.Home,
                                         null,
                                     )
                                 },
-
                                 onClick = {
-
                                     navigateTo(
-                                        HOME_URL
+                                        HOME_URL,
                                     )
 
-                                    showMenu = false
+                                    showMenu =
+                                        false
                                 },
                             )
 
                             DropdownMenuItem(
-
                                 text = {
-                                    Text("Create another session")
+                                    Text(
+                                        "Create another session",
+                                    )
                                 },
-
                                 leadingIcon = {
                                     Icon(
                                         Icons.Default.Add,
                                         null,
                                     )
                                 },
-
                                 onClick = {
-
-                                    showMenu = false
+                                    showMenu =
+                                        false
 
                                     onCreateAnother()
                                 },
                             )
 
                             DropdownMenuItem(
-
                                 text = {
-                                    Text("Copy Session Info")
-                                },
-
-                                leadingIcon = {
-                                    Icon(
-                                        Icons.Default.ContentCopy,
-                                        null,
+                                    Text(
+                                        "Close",
                                     )
                                 },
-
                                 onClick = {
-
-                                    showMenu = false
-
-                                    flushProfileCookies()
-
-                                    copySafeSessionInfo(
-                                        context = context,
-                                        session = session,
-                                        currentUrl = currentUrl,
-                                        pageTitle = pageTitle,
-                                    )
-                                },
-                            )
-
-                            DropdownMenuItem(
-
-                                text = {
-                                    Text("Copy Cookie Info")
-                                },
-
-                                leadingIcon = {
-                                    Icon(
-                                        Icons.Default.ContentCopy,
-                                        null,
-                                    )
-                                },
-
-                                onClick = {
-
-                                    showMenu = false
-
-                                    flushProfileCookies()
-
-                                    copyCookieInfo(
-                                        context = context,
-                                        session = session,
-                                        currentUrl = currentUrl,
-                                        multiProfileSupported = multiProfileSupported,
-                                    )
-                                },
-                            )
-
-                            DropdownMenuItem(
-
-                                text = {
-                                    Text("Close")
-                                },
-
-                                onClick = {
-
-                                    showMenu = false
+                                    showMenu =
+                                        false
 
                                     flushProfileCookies()
 
@@ -1919,13 +3294,15 @@ private fun BrowserScreen(
                     },
                 )
 
-                if (isLoading) {
+                if (
+                    isLoading
+                ) {
 
                     LinearProgressIndicator(
                         progress = {
-                            loadingProgress / 100f
+                            loadingProgress /
+                                100f
                         },
-
                         modifier =
                             Modifier.fillMaxWidth(),
                     )
@@ -1937,7 +3314,9 @@ private fun BrowserScreen(
         Box(
             Modifier
                 .fillMaxSize()
-                .padding(pad)
+                .padding(
+                    pad,
+                ),
         ) {
 
             AndroidView(
@@ -1947,20 +3326,31 @@ private fun BrowserScreen(
 
                 factory = { ctx ->
 
-                    FrameLayout(ctx).also { root ->
+                    FrameLayout(
+                        ctx,
+                    ).also { root ->
 
-                        rootRef = root
+                        rootRef =
+                            root
 
                         val initial =
-                            WebView(ctx)
+                            WebView(
+                                ctx,
+                            )
 
-                        configureProfile(initial)
+                        configureProfile(
+                            initial,
+                        )
 
                         initial.webViewClient =
-                            makeClient(initial)
+                            makeClient(
+                                initial,
+                            )
 
                         initial.webChromeClient =
-                            makeChromeClient(initial)
+                            makeChromeClient(
+                                initial,
+                            )
 
                         initial.layoutParams =
                             FrameLayout.LayoutParams(
@@ -1968,42 +3358,49 @@ private fun BrowserScreen(
                                 ViewGroup.LayoutParams.MATCH_PARENT,
                             )
 
-                        root.addView(initial)
+                        root.addView(
+                            initial,
+                        )
 
-                        activeWebView = initial
+                        activeWebView =
+                            initial
 
                         initial.loadUrl(
-                            HOME_URL
+                            HOME_URL,
                         )
                     }
                 },
 
                 update = { root ->
 
-                    rootRef = root
+                    rootRef =
+                        root
 
                     val child =
                         root.getChildAt(
-                            root.childCount - 1
+                            root.childCount - 1,
                         ) as? WebView
 
                     if (
                         child != null &&
                         activeWebView == null
                     ) {
-                        activeWebView = child
+                        activeWebView =
+                            child
                     }
                 },
 
                 onRelease = { root ->
 
                     for (
-                        i in root.childCount - 1 downTo 0
+                        i in
+                        root.childCount - 1 downTo 0
                     ) {
 
                         (
-                            root.getChildAt(i)
-                                as? WebView
+                            root.getChildAt(
+                                i,
+                            ) as? WebView
                             )?.let { web ->
 
                             runCatching {
@@ -2011,7 +3408,7 @@ private fun BrowserScreen(
                                 web.stopLoading()
 
                                 web.loadUrl(
-                                    "about:blank"
+                                    "about:blank",
                                 )
 
                                 web.removeAllViews()
@@ -2023,52 +3420,55 @@ private fun BrowserScreen(
 
                     root.removeAllViews()
 
-                    activeWebView = null
+                    activeWebView =
+                        null
 
-                    rootRef = null
+                    rootRef =
+                        null
                 },
             )
 
             errorMsg?.let { err ->
 
                 Column(
-
                     Modifier
                         .fillMaxSize()
                         .background(
                             MaterialTheme
                                 .colorScheme
                                 .errorContainer
-                                .copy(alpha = 0.96f)
+                                .copy(
+                                    alpha =
+                                        0.96f,
+                                ),
                         )
-                        .padding(24.dp),
-
+                        .padding(
+                            24.dp,
+                        ),
                     verticalArrangement =
                         Arrangement.Center,
-
                     horizontalAlignment =
                         Alignment.CenterHorizontally,
                 ) {
 
                     Text(
                         "Page failed to load",
-
                         style =
                             MaterialTheme
                                 .typography
                                 .titleMedium,
-
                         fontWeight =
                             FontWeight.Bold,
                     )
 
                     Spacer(
-                        Modifier.height(8.dp)
+                        Modifier.height(
+                            8.dp,
+                        ),
                     )
 
                     Text(
                         err,
-
                         style =
                             MaterialTheme
                                 .typography
@@ -2076,32 +3476,23 @@ private fun BrowserScreen(
                     )
 
                     Spacer(
-                        Modifier.height(8.dp)
-                    )
-
-                    Text(
-                        currentUrl,
-
-                        style =
-                            MaterialTheme
-                                .typography
-                                .labelSmall,
-                    )
-
-                    Spacer(
-                        Modifier.height(16.dp)
+                        Modifier.height(
+                            16.dp,
+                        ),
                     )
 
                     Button(
                         onClick = {
+                            errorMsg =
+                                null
 
-                            errorMsg = null
-
-                            activeWebView?.reload()
-                        }
+                            activeWebView
+                                ?.reload()
+                        },
                     ) {
-
-                        Text("Reload")
+                        Text(
+                            "Reload",
+                        )
                     }
                 }
             }
