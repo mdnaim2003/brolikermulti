@@ -1,6 +1,7 @@
 package com.broliker.multisession.ui
 
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -17,6 +18,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -56,6 +58,15 @@ import java.util.UUID
 private const val HOME_URL = "https://m.facebook.com/"
 private const val PAGE_SIZE = 50
 
+private fun Context.findActivity(): Activity? {
+    var current: Context? = this
+    while (current is android.content.ContextWrapper) {
+        if (current is Activity) return current
+        current = current.baseContext
+    }
+    return current as? Activity
+}
+
 // ─── Session colors (auto-assign cycle) ──────────────────────────────────────
 
 private val SESSION_COLORS = listOf(
@@ -64,7 +75,8 @@ private val SESSION_COLORS = listOf(
     "#673AB7", "#03A9F4", "#8BC34A", "#FF5722", "#00BCD4",
 )
 
-private fun colorForIndex(index: Int): String = SESSION_COLORS[index % SESSION_COLORS.size]
+private fun colorForIndex(index: Int): String =
+    SESSION_COLORS[index % SESSION_COLORS.size]
 
 // ─── Data ─────────────────────────────────────────────────────────────────────
 
@@ -77,14 +89,14 @@ private data class SessionMeta(
     val lastOpenedAt: Long = 0L,
     val archived: Boolean = false,
     val color: String = "#2196F3",
-    // Cached c_user from last cookie read (for search)
     val cachedCUser: String = "",
 )
 
 // ─── Store ────────────────────────────────────────────────────────────────────
 
 private class SessionStore(context: Context) {
-    private val prefs = context.getSharedPreferences("bro_sessions", Context.MODE_PRIVATE)
+    private val prefs =
+        context.getSharedPreferences("bro_sessions", Context.MODE_PRIVATE)
 
     fun load(): List<SessionMeta> = runCatching {
         val arr = JSONArray(prefs.getString("items", "[]"))
@@ -111,26 +123,32 @@ private class SessionStore(context: Context) {
     fun save(items: List<SessionMeta>) {
         val arr = JSONArray()
         items.forEach { s ->
-            arr.put(JSONObject().apply {
-                put("id", s.id)
-                put("profileName", s.profileName)
-                put("name", s.name)
-                put("group", s.group)
-                put("createdAt", s.createdAt)
-                put("lastOpenedAt", s.lastOpenedAt)
-                put("archived", s.archived)
-                put("color", s.color)
-                put("cachedCUser", s.cachedCUser)
-            })
+            arr.put(
+                JSONObject().apply {
+                    put("id", s.id)
+                    put("profileName", s.profileName)
+                    put("name", s.name)
+                    put("group", s.group)
+                    put("createdAt", s.createdAt)
+                    put("lastOpenedAt", s.lastOpenedAt)
+                    put("archived", s.archived)
+                    put("color", s.color)
+                    put("cachedCUser", s.cachedCUser)
+                }
+            )
         }
         prefs.edit().putString("items", arr.toString()).apply()
     }
 
     fun nextSerialNumber(current: List<SessionMeta>): Int {
         val used = current.mapNotNull { s ->
-            Regex("^My Session (\\d+)$").find(s.name)
-                ?.groupValues?.get(1)?.toIntOrNull()
+            Regex("^My Session (\\d+)$")
+                .find(s.name)
+                ?.groupValues
+                ?.get(1)
+                ?.toIntOrNull()
         }.toSet()
+
         var n = 1
         while (used.contains(n)) n++
         return n
@@ -148,12 +166,13 @@ private val FB_DOMAINS = listOf(
     "https://static.xx.fbcdn.net",
 )
 
-/** Parse raw cookie header string → flat key→value map */
 private fun parseCookieHeader(raw: String): Map<String, String> {
     val map = mutableMapOf<String, String>()
+
     raw.split(";").forEach { part ->
         val trimmed = part.trim()
         val eq = trimmed.indexOf('=')
+
         if (eq > 0) {
             val k = trimmed.substring(0, eq).trim()
             val v = trimmed.substring(eq + 1).trim()
@@ -162,10 +181,10 @@ private fun parseCookieHeader(raw: String): Map<String, String> {
             map[trimmed] = ""
         }
     }
+
     return map
 }
 
-/** Collect all cookies for a session from profile-scoped or global manager */
 private fun collectCookiesForSession(
     session: SessionMeta,
     multiProfileSupported: Boolean,
@@ -173,194 +192,226 @@ private fun collectCookiesForSession(
 ): Map<String, String> {
     val profileMgr = if (multiProfileSupported) {
         runCatching {
-            ProfileStore.getInstance().getProfile(session.profileName)?.cookieManager
+            ProfileStore
+                .getInstance()
+                .getProfile(session.profileName)
+                ?.cookieManager
         }.getOrNull()
-    } else null
+    } else {
+        null
+    }
 
     val globalMgr = CookieManager.getInstance()
-    val result = mutableMapOf<String, String>()
 
-    val domains = if (extraUrl.isNotBlank() && !FB_DOMAINS.any { extraUrl.startsWith(it) })
-        FB_DOMAINS + extraUrl else FB_DOMAINS
+    val result = linkedMapOf<String, String>()
 
-    domains.forEach { domain ->
-        val raw = profileMgr?.getCookie(domain) ?: globalMgr.getCookie(domain)
-        if (!raw.isNullOrBlank()) {
-            parseCookieHeader(raw).forEach { (k, v) ->
-                if (!result.containsKey(k)) result[k] = v
-            }
+    val urls = buildList {
+        addAll(FB_DOMAINS)
+        if (extraUrl.isNotBlank()) add(extraUrl)
+    }.distinct()
+
+    urls.forEach { url ->
+        runCatching {
+            profileMgr?.getCookie(url)?.let { result.putAll(parseCookieHeader(it)) }
+        }
+
+        runCatching {
+            globalMgr.getCookie(url)?.let { result.putAll(parseCookieHeader(it)) }
         }
     }
+
     return result
 }
 
-/** Build exact output JSON object for one session */
 private fun buildSessionCookieJson(
     session: SessionMeta,
-    cookies: Map<String, String>,
+    multiProfileSupported: Boolean,
+    extraUrl: String = "",
 ): JSONObject {
-    // Build cookies sub-object — keep all keys, empty string if unavailable
-    val cookiesObj = JSONObject()
-    // Priority keys first (always present, even if empty)
-    val priorityKeys = listOf(
-        "datr", "fr", "sb", "ps_l", "ps_n",
-        "c_user", "xs", "presence", "wd", "dbln",
-        "NID", "__Secure-STRP", "SEARCH_SAMESITE", "AEC", "OTZ"
+    val cookies = collectCookiesForSession(
+        session,
+        multiProfileSupported,
+        extraUrl,
     )
-    priorityKeys.forEach { key ->
-        cookiesObj.put(key, cookies[key] ?: "")
-    }
-    // Any extra keys not in priority list
-    cookies.forEach { (k, v) ->
-        if (!priorityKeys.contains(k)) cookiesObj.put(k, v)
-    }
 
     return JSONObject().apply {
-        put("sessionId", session.id)
-        put("color", session.color)
-        put("cookies", cookiesObj)
+        put("id", session.id)
+        put("sessionName", session.name)
+        put("profileName", session.profileName)
+
+        val cookieObj = JSONObject()
+        cookies.forEach { (key, value) ->
+            cookieObj.put(key, value)
+        }
+
+        put("cookies", cookieObj)
     }
 }
-
-// ─── Export / Import ──────────────────────────────────────────────────────────
 
 private fun exportCookiesForProfile(
     session: SessionMeta,
     multiProfileSupported: Boolean,
-): String {
-    val cookies = collectCookiesForSession(session, multiProfileSupported)
-    val cookieMap = JSONObject()
-    FB_DOMAINS.forEach { domain ->
-        val profileMgr = if (multiProfileSupported) {
-            runCatching {
-                ProfileStore.getInstance().getProfile(session.profileName)?.cookieManager
-            }.getOrNull()
-        } else null
-        val raw = profileMgr?.getCookie(domain) ?: CookieManager.getInstance().getCookie(domain)
-        if (!raw.isNullOrBlank()) cookieMap.put(domain, raw)
-    }
-    return cookieMap.toString()
+): JSONObject {
+    return buildSessionCookieJson(
+        session = session,
+        multiProfileSupported = multiProfileSupported,
+    )
 }
 
 private fun importCookiesForProfile(
-    profileName: String,
-    cookieJson: String,
+    session: SessionMeta,
     multiProfileSupported: Boolean,
+    cookieObject: JSONObject,
 ) {
-    try {
-        val mgr = CookieManager.getInstance()
-        mgr.setAcceptCookie(true)
-        val obj = JSONObject(cookieJson)
-        obj.keys().forEach { domain ->
-            val cookieHeader = obj.getString(domain)
-            cookieHeader.split(";").forEach { part ->
-                val trimmed = part.trim()
-                if (trimmed.isNotEmpty()) mgr.setCookie(domain, trimmed)
+    if (!multiProfileSupported) return
+
+    runCatching {
+        val profile =
+            ProfileStore.getInstance().getProfile(session.profileName)
+                ?: return@runCatching
+
+        val cookieManager = profile.cookieManager
+
+        val keys = cookieObject.keys()
+
+        while (keys.hasNext()) {
+            val key = keys.next()
+            val value = cookieObject.optString(key)
+
+            if (value.isNotEmpty()) {
+                cookieManager.setCookie(
+                    HOME_URL,
+                    "$key=$value; Path=/"
+                )
             }
         }
-        mgr.flush()
-    } catch (_: Exception) {}
+
+        cookieManager.flush()
+    }
 }
 
 private fun buildExportJson(
     sessions: List<SessionMeta>,
     multiProfileSupported: Boolean,
 ): String {
-    val arr = JSONArray()
-    sessions.filter { !it.archived }.forEach { s ->
-        val cookieRaw = exportCookiesForProfile(s, multiProfileSupported)
-        arr.put(JSONObject().apply {
-            put("id", s.id)
-            put("profileName", s.profileName)
-            put("name", s.name)
-            put("group", s.group)
-            put("createdAt", s.createdAt)
-            put("lastOpenedAt", s.lastOpenedAt)
-            put("archived", s.archived)
-            put("color", s.color)
-            put("cachedCUser", s.cachedCUser)
-            put("cookies", cookieRaw)
-        })
-    }
-    return JSONObject().apply {
-        put("app", "BroLiker")
-        put("version", 3)
+    val root = JSONObject().apply {
+        put("version", 1)
         put("exportedAt", System.currentTimeMillis())
-        put("sessions", arr)
-    }.toString(2)
+
+        val array = JSONArray()
+
+        sessions.forEach { session ->
+            val obj = JSONObject().apply {
+                put("id", session.id)
+                put("profileName", session.profileName)
+                put("name", session.name)
+                put("group", session.group)
+                put("createdAt", session.createdAt)
+                put("lastOpenedAt", session.lastOpenedAt)
+                put("archived", session.archived)
+                put("color", session.color)
+                put("cachedCUser", session.cachedCUser)
+
+                put(
+                    "cookies",
+                    exportCookiesForProfile(
+                        session,
+                        multiProfileSupported
+                    )
+                )
+            }
+
+            array.put(obj)
+        }
+
+        put("sessions", array)
+    }
+
+    return root.toString(2)
 }
 
 private fun parseImportJson(
     json: String,
     multiProfileSupported: Boolean,
 ): List<SessionMeta> {
-    val root = JSONObject(json)
-    val arr = root.getJSONArray("sessions")
     val result = mutableListOf<SessionMeta>()
-    for (i in 0 until arr.length()) {
-        val o = arr.getJSONObject(i)
-        val meta = SessionMeta(
-            id = o.optString("id", UUID.randomUUID().toString()),
-            profileName = o.optString("profileName", "profile_${UUID.randomUUID()}"),
-            name = o.optString("name", "Imported Session ${i + 1}"),
-            group = o.optString("group", ""),
-            createdAt = o.optLong("createdAt", System.currentTimeMillis()),
+    val root = JSONObject(json)
+    val array = root.optJSONArray("sessions") ?: JSONArray()
+
+    for (i in 0 until array.length()) {
+        val o = array.getJSONObject(i)
+
+        val id = o.optString("id", UUID.randomUUID().toString())
+        val profileName =
+            o.optString("profileName", "profile_${UUID.randomUUID()}")
+
+        val session = SessionMeta(
+            id = id,
+            profileName = profileName,
+            name = o.optString("name", "Imported Session"),
+            group = o.optString("group"),
+            createdAt = o.optLong(
+                "createdAt",
+                System.currentTimeMillis()
+            ),
             lastOpenedAt = o.optLong("lastOpenedAt", 0L),
             archived = o.optBoolean("archived", false),
-            color = o.optString("color", colorForIndex(i)),
+            color = o.optString("color", "#2196F3"),
             cachedCUser = o.optString("cachedCUser", ""),
         )
-        result.add(meta)
-        val cookiesStr = o.optString("cookies", "{}")
-        if (cookiesStr.isNotBlank() && cookiesStr != "{}") {
-            importCookiesForProfile(meta.profileName, cookiesStr, multiProfileSupported)
+
+        result.add(session)
+
+        val cookieContainer = o.optJSONObject("cookies")
+        val cookieObject =
+            cookieContainer?.optJSONObject("cookies")
+
+        if (cookieObject != null) {
+            importCookiesForProfile(
+                session,
+                multiProfileSupported,
+                cookieObject
+            )
         }
     }
+
     return result
 }
 
-// ─── Cookie copy helpers ──────────────────────────────────────────────────────
-
-/** Copy cookies for multiple sessions in exact format */
 private fun copyMultiSessionCookies(
     context: Context,
     sessions: List<SessionMeta>,
     multiProfileSupported: Boolean,
 ) {
-    try {
-        val root = JSONObject()
-        var totalSessions = 0
-        var totalCookies = 0
+    val root = JSONArray()
 
-        sessions.forEach { session ->
-            val cookies = collectCookiesForSession(session, multiProfileSupported)
-            val sessionObj = buildSessionCookieJson(session, cookies)
-            root.put(session.name, sessionObj)
-            totalSessions++
-            totalCookies += cookies.size
-        }
-
-        val jsonString = root.toString(2)
-        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("BroLiker Multi Cookies", jsonString))
-
-        val hasCUser = sessions.any { s ->
-            collectCookiesForSession(s, multiProfileSupported).containsKey("c_user")
-        }
-
-        Toast.makeText(
-            context,
-            if (hasCUser) "✅ $totalSessions sessions, $totalCookies cookies copied!"
-            else "⚠️ Copied but login cookies (c_user) not found. Login first.",
-            Toast.LENGTH_LONG,
-        ).show()
-
-    } catch (e: Exception) {
-        Toast.makeText(context, "❌ Error: ${e.message}", Toast.LENGTH_LONG).show()
+    sessions.forEach { session ->
+        root.put(
+            buildSessionCookieJson(
+                session,
+                multiProfileSupported
+            )
+        )
     }
+
+    val clipboard =
+        context.getSystemService(Context.CLIPBOARD_SERVICE)
+            as ClipboardManager
+
+    clipboard.setPrimaryClip(
+        ClipData.newPlainText(
+            "Bro Liker Cookies",
+            root.toString(2)
+        )
+    )
+
+    Toast.makeText(
+        context,
+        "Cookies copied",
+        Toast.LENGTH_SHORT
+    ).show()
 }
 
-/** Single session cookie copy (from browser screen) */
 private fun copySingleSessionCookies(
     context: Context,
     session: SessionMeta,
@@ -368,221 +419,521 @@ private fun copySingleSessionCookies(
     currentUrl: String,
     pageTitle: String,
 ) {
-    try {
-        val cookies = collectCookiesForSession(session, multiProfileSupported, currentUrl)
-        val root = JSONObject()
-        root.put(session.name, buildSessionCookieJson(session, cookies))
-
-        val jsonString = root.toString(2)
-        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("BroLiker Cookies", jsonString))
-
-        val cUser = cookies["c_user"]
-        Toast.makeText(
-            context,
-            if (cUser != null) "✅ ${cookies.size} cookies copied! c_user: $cUser"
-            else "⚠️ ${cookies.size} cookies copied. Login keys not found.",
-            Toast.LENGTH_LONG,
-        ).show()
-
-    } catch (e: Exception) {
-        Toast.makeText(context, "❌ Error: ${e.message}", Toast.LENGTH_LONG).show()
+    val obj = buildSessionCookieJson(
+        session,
+        multiProfileSupported,
+        currentUrl
+    ).apply {
+        put("url", currentUrl)
+        put("title", pageTitle)
     }
-}
 
-// ─── Hex color → Compose Color ────────────────────────────────────────────────
+    val clipboard =
+        context.getSystemService(Context.CLIPBOARD_SERVICE)
+            as ClipboardManager
+
+    clipboard.setPrimaryClip(
+        ClipData.newPlainText(
+            "Bro Liker Session Cookies",
+            obj.toString(2)
+        )
+    )
+
+    Toast.makeText(
+        context,
+        "Cookies copied",
+        Toast.LENGTH_SHORT
+    ).show()
+}
 
 private fun hexToColor(hex: String): Color {
-    return try {
+    return runCatching {
         Color(android.graphics.Color.parseColor(hex))
-    } catch (_: Exception) {
-        Color(0xFF2196F3)
-    }
+    }.getOrDefault(Color(0xFF2196F3))
 }
 
-// ─── Main composable ──────────────────────────────────────────────────────────
+// ─── Main application ─────────────────────────────────────────────────────────
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BroLikerApp() {
     val context = LocalContext.current.applicationContext
     val store = remember { SessionStore(context) }
 
     val multiProfileSupported = remember {
-        WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)
+        WebViewFeature.isFeatureSupported(
+            WebViewFeature.MULTI_PROFILE
+        )
     }
 
-    var sessions by remember { mutableStateOf(store.load()) }
-    var selected by remember { mutableStateOf<SessionMeta?>(null) }
-    var showCreate by remember { mutableStateOf(false) }
-    var showRename by remember { mutableStateOf<SessionMeta?>(null) }
-    var showGroupManager by remember { mutableStateOf(false) }
-    var showBulkGroup by remember { mutableStateOf(false) }
-    var showSettings by remember { mutableStateOf(false) }
-    var query by remember { mutableStateOf("") }
-    var filter by remember { mutableStateOf("All") }
-    var selectedIds by remember { mutableStateOf(setOf<String>()) }
-    var currentPage by remember { mutableIntStateOf(0) }
+    var sessions by remember {
+        mutableStateOf(store.load())
+    }
 
-    val exportLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("application/json")
-    ) { uri: Uri? ->
-        uri ?: return@rememberLauncherForActivityResult
-        try {
-            val json = buildExportJson(sessions, multiProfileSupported)
-            context.contentResolver.openOutputStream(uri)?.use { it.write(json.toByteArray()) }
-            Toast.makeText(context, "✅ Export সফল হয়েছে", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
-            Toast.makeText(context, "❌ Export ব্যর্থ: ${e.message}", Toast.LENGTH_LONG).show()
+    var selected by remember {
+        mutableStateOf<SessionMeta?>(null)
+    }
+
+    var showCreate by remember {
+        mutableStateOf(false)
+    }
+
+    var showRename by remember {
+        mutableStateOf<SessionMeta?>(null)
+    }
+
+    var showGroupManager by remember {
+        mutableStateOf(false)
+    }
+
+    var showBulkGroup by remember {
+        mutableStateOf(false)
+    }
+
+    var showSettings by remember {
+        mutableStateOf(false)
+    }
+
+    var showExitConfirmation by remember {
+        mutableStateOf(false)
+    }
+
+    var pendingDeleteIds by remember {
+        mutableStateOf<Set<String>?>(null)
+    }
+
+    var pendingDeleteGroup by remember {
+        mutableStateOf<String?>(null)
+    }
+
+    var query by remember {
+        mutableStateOf("")
+    }
+
+    var filter by remember {
+        mutableStateOf("All")
+    }
+
+    var selectedIds by remember {
+        mutableStateOf(setOf<String>())
+    }
+
+    var currentPage by remember {
+        mutableIntStateOf(0)
+    }
+
+    val exportLauncher =
+        rememberLauncherForActivityResult(
+            ActivityResultContracts.CreateDocument(
+                "application/json"
+            )
+        ) { uri: Uri? ->
+            uri ?: return@rememberLauncherForActivityResult
+
+            try {
+                val json = buildExportJson(
+                    sessions,
+                    multiProfileSupported
+                )
+
+                context.contentResolver
+                    .openOutputStream(uri)
+                    ?.use {
+                        it.write(json.toByteArray())
+                    }
+
+                Toast.makeText(
+                    context,
+                    "✅ Export সফল হয়েছে",
+                    Toast.LENGTH_SHORT
+                ).show()
+            } catch (e: Exception) {
+                Toast.makeText(
+                    context,
+                    "❌ Export ব্যর্থ: ${e.message}",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
         }
-    }
 
-    val importLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        uri ?: return@rememberLauncherForActivityResult
-        try {
-            val json = context.contentResolver.openInputStream(uri)?.use {
-                it.bufferedReader().readText()
-            } ?: return@rememberLauncherForActivityResult
-            val imported = parseImportJson(json, multiProfileSupported)
-            val existingIds = sessions.map { it.id }.toSet()
-            val newOnes = imported.filter { it.id !in existingIds }
-            val merged = sessions + newOnes
-            sessions = merged
-            store.save(merged)
-            Toast.makeText(context, "✅ ${newOnes.size} session import হয়েছে", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
-            Toast.makeText(context, "❌ Import ব্যর্থ: ${e.message}", Toast.LENGTH_LONG).show()
+    val importLauncher =
+        rememberLauncherForActivityResult(
+            ActivityResultContracts.OpenDocument()
+        ) { uri: Uri? ->
+            uri ?: return@rememberLauncherForActivityResult
+
+            try {
+                val json =
+                    context.contentResolver
+                        .openInputStream(uri)
+                        ?.use {
+                            it.bufferedReader().readText()
+                        }
+                        ?: return@rememberLauncherForActivityResult
+
+                val imported =
+                    parseImportJson(
+                        json,
+                        multiProfileSupported
+                    )
+
+                val existingIds =
+                    sessions.map { it.id }.toSet()
+
+                val newOnes =
+                    imported.filter {
+                        it.id !in existingIds
+                    }
+
+                val merged = sessions + newOnes
+
+                sessions = merged
+                store.save(merged)
+
+                Toast.makeText(
+                    context,
+                    "✅ ${newOnes.size} session import হয়েছে",
+                    Toast.LENGTH_SHORT
+                ).show()
+            } catch (e: Exception) {
+                Toast.makeText(
+                    context,
+                    "❌ Import ব্যর্থ: ${e.message}",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
         }
-    }
 
     if (selected != null) {
         BrowserScreen(
             session = selected!!,
             multiProfileSupported = multiProfileSupported,
-            onBack = { selected = null },
-            onCreateAnother = { showCreate = true },
+            onBack = {
+                selected = null
+            },
+            onCreateAnother = {
+                showCreate = true
+            },
             onCUserDetected = { cUser ->
-                // Update cachedCUser when detected from browser
                 sessions = sessions.map {
-                    if (it.id == selected!!.id) it.copy(cachedCUser = cUser) else it
+                    if (it.id == selected!!.id) {
+                        it.copy(
+                            cachedCUser = cUser
+                        )
+                    } else {
+                        it
+                    }
                 }
+
                 store.save(sessions)
             }
         )
+
         if (showCreate) {
             val idx = store.nextColorIndex(sessions)
+
             CreateSessionDialog(
-                groups = sessions.map { it.group }.filter { it.isNotBlank() }.distinct().sorted(),
-                nextSerial = store.nextSerialNumber(sessions),
-                defaultColor = colorForIndex(idx),
-                onDismiss = { showCreate = false },
+                groups = sessions
+                    .map { it.group }
+                    .filter { it.isNotBlank() }
+                    .distinct()
+                    .sorted(),
+
+                nextSerial =
+                    store.nextSerialNumber(sessions),
+
+                defaultColor =
+                    colorForIndex(idx),
+
+                onDismiss = {
+                    showCreate = false
+                },
             ) { name, group, color ->
-                val profileName = "profile_${UUID.randomUUID()}"
-                val meta = SessionMeta(
-                    id = UUID.randomUUID().toString(),
-                    profileName = profileName,
-                    name = name,
-                    group = group,
-                    createdAt = System.currentTimeMillis(),
-                    color = color,
-                )
+
+                val profileName =
+                    "profile_${UUID.randomUUID()}"
+
+                val meta =
+                    SessionMeta(
+                        id = UUID.randomUUID().toString(),
+                        profileName = profileName,
+                        name = name,
+                        group = group,
+                        createdAt = System.currentTimeMillis(),
+                        color = color,
+                    )
+
                 sessions = sessions + meta
                 store.save(sessions)
+
                 selected = meta
                 showCreate = false
             }
         }
+
         return
     }
 
-    val groups = listOf("All", "Ungrouped") +
-        sessions.map { it.group }.filter { it.isNotBlank() }.distinct().sorted()
-
-    // Search: name OR c_user match
-    val filtered = sessions.filter { !it.archived }.filter { session ->
-        val groupOk = when (filter) {
-            "All" -> true
-            "Ungrouped" -> session.group.isBlank()
-            else -> session.group == filter
-        }
-        val q = query.trim()
-        val matchOk = q.isBlank() ||
-            session.name.contains(q, ignoreCase = true) ||
-            (q.length >= 6 && session.cachedCUser.contains(q, ignoreCase = true))
-        groupOk && matchOk
+    // Main screen system Back button:
+    // never exits immediately; always asks for confirmation.
+    BackHandler(enabled = true) {
+        showExitConfirmation = true
     }
 
-    val totalPages = ((filtered.size - 1) / PAGE_SIZE + 1).coerceAtLeast(1)
-    val safePage = currentPage.coerceIn(0, totalPages - 1)
-    val pageItems = filtered.drop(safePage * PAGE_SIZE).take(PAGE_SIZE)
-    val allPageSelected = pageItems.isNotEmpty() && pageItems.all { it.id in selectedIds }
+    val groups =
+        listOf("All", "Ungrouped") +
+            sessions
+                .map { it.group }
+                .filter { it.isNotBlank() }
+                .distinct()
+                .sorted()
 
-    LaunchedEffect(filter, query) { currentPage = 0 }
+    val filtered =
+        sessions
+            .filter { !it.archived }
+            .filter { session ->
+
+                val groupOk =
+                    when (filter) {
+                        "All" -> true
+                        "Ungrouped" ->
+                            session.group.isBlank()
+
+                        else ->
+                            session.group == filter
+                    }
+
+                val q = query.trim()
+
+                val matchOk =
+                    q.isBlank() ||
+                        session.name.contains(
+                            q,
+                            ignoreCase = true
+                        ) ||
+                        (
+                            q.length >= 6 &&
+                                session.cachedCUser.contains(
+                                    q,
+                                    ignoreCase = true
+                                )
+                            )
+
+                groupOk && matchOk
+            }
+
+    val totalPages =
+        ((filtered.size - 1) / PAGE_SIZE + 1)
+            .coerceAtLeast(1)
+
+    val safePage =
+        currentPage.coerceIn(
+            0,
+            totalPages - 1
+        )
+
+    val pageItems =
+        filtered
+            .drop(safePage * PAGE_SIZE)
+            .take(PAGE_SIZE)
+
+    val allPageSelected =
+        pageItems.isNotEmpty() &&
+            pageItems.all {
+                it.id in selectedIds
+            }
+
+    LaunchedEffect(filter, query) {
+        currentPage = 0
+    }
 
     Scaffold(
-        contentWindowInsets = WindowInsets.safeDrawing,
+        contentWindowInsets =
+            WindowInsets.safeDrawing,
+
         topBar = {
             TopAppBar(
                 title = {
                     Column {
-                        Text("Bro Liker", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                        Text(
+                            "Bro Liker",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 18.sp
+                        )
+
                         Text(
                             "${sessions.count { !it.archived }} sessions",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style =
+                                MaterialTheme.typography.labelSmall,
+                            color =
+                                MaterialTheme.colorScheme
+                                    .onSurfaceVariant,
                         )
                     }
                 },
+
                 actions = {
-                    IconButton(onClick = { showSettings = true }) {
-                        Icon(Icons.Default.Settings, "Settings")
+
+                    IconButton(
+                        onClick = {
+                            showSettings = true
+                        }
+                    ) {
+                        Icon(
+                            Icons.Default.Settings,
+                            "Settings"
+                        )
                     }
-                    IconButton(onClick = { showGroupManager = true }) {
-                        Icon(Icons.Default.AccountTree, "Groups")
+
+                    IconButton(
+                        onClick = {
+                            showGroupManager = true
+                        }
+                    ) {
+                        Icon(
+                            Icons.Default.AccountTree,
+                            "Groups"
+                        )
                     }
-                    var showMore by remember { mutableStateOf(false) }
-                    IconButton(onClick = { showMore = true }) {
-                        Icon(Icons.Default.MoreVert, "More")
+
+                    var showMore by remember {
+                        mutableStateOf(false)
                     }
-                    DropdownMenu(expanded = showMore, onDismissRequest = { showMore = false }) {
+
+                    IconButton(
+                        onClick = {
+                            showMore = true
+                        }
+                    ) {
+                        Icon(
+                            Icons.Default.MoreVert,
+                            "More"
+                        )
+                    }
+
+                    DropdownMenu(
+                        expanded = showMore,
+                        onDismissRequest = {
+                            showMore = false
+                        }
+                    ) {
+
                         DropdownMenuItem(
-                            text = { Text(if (allPageSelected) "Deselect page" else "Select page") },
-                            leadingIcon = { Icon(Icons.Default.SelectAll, null) },
+                            text = {
+                                Text(
+                                    if (allPageSelected)
+                                        "Deselect page"
+                                    else
+                                        "Select page"
+                                )
+                            },
+
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.SelectAll,
+                                    null
+                                )
+                            },
+
                             onClick = {
-                                selectedIds = if (allPageSelected)
-                                    selectedIds - pageItems.map { it.id }.toSet()
-                                else selectedIds + pageItems.map { it.id }.toSet()
+
+                                selectedIds =
+                                    if (allPageSelected) {
+                                        selectedIds -
+                                            pageItems
+                                                .map { it.id }
+                                                .toSet()
+                                    } else {
+                                        selectedIds +
+                                            pageItems
+                                                .map { it.id }
+                                                .toSet()
+                                    }
+
                                 showMore = false
                             }
                         )
+
                         DropdownMenuItem(
-                            text = { Text("Select all in group") },
-                            leadingIcon = { Icon(Icons.Default.DoneAll, null) },
+                            text = {
+                                Text(
+                                    "Select all in group"
+                                )
+                            },
+
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.DoneAll,
+                                    null
+                                )
+                            },
+
                             onClick = {
-                                selectedIds = selectedIds + filtered.map { it.id }.toSet()
+
+                                selectedIds =
+                                    selectedIds +
+                                        filtered
+                                            .map { it.id }
+                                            .toSet()
+
                                 showMore = false
                             }
                         )
+
                         DropdownMenuItem(
-                            text = { Text("Clear selection") },
-                            onClick = { selectedIds = emptySet(); showMore = false }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Bulk move to group") },
-                            leadingIcon = { Icon(Icons.Default.DriveFileMove, null) },
-                            enabled = selectedIds.isNotEmpty(),
-                            onClick = { showBulkGroup = true; showMore = false }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Delete selected") },
-                            leadingIcon = { Icon(Icons.Default.Delete, null) },
-                            enabled = selectedIds.isNotEmpty(),
+                            text = {
+                                Text("Clear selection")
+                            },
+
                             onClick = {
-                                sessions = sessions.filterNot { it.id in selectedIds }
-                                store.save(sessions)
                                 selectedIds = emptySet()
+                                showMore = false
+                            }
+                        )
+
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    "Bulk move to group"
+                                )
+                            },
+
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.DriveFileMove,
+                                    null
+                                )
+                            },
+
+                            enabled =
+                                selectedIds.isNotEmpty(),
+
+                            onClick = {
+                                showBulkGroup = true
+                                showMore = false
+                            }
+                        )
+
+                        DropdownMenuItem(
+                            text = {
+                                Text("Delete selected")
+                            },
+
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.Delete,
+                                    null
+                                )
+                            },
+
+                            enabled =
+                                selectedIds.isNotEmpty(),
+
+                            onClick = {
+                                // IMPORTANT:
+                                // Ask confirmation first.
+                                pendingDeleteIds =
+                                    selectedIds
+
                                 showMore = false
                             }
                         )
@@ -590,11 +941,21 @@ fun BroLikerApp() {
                 }
             )
         },
+
         floatingActionButton = {
-            FloatingActionButton(onClick = { showCreate = true }) {
-                Icon(Icons.Default.Add, "New session")
+
+            FloatingActionButton(
+                onClick = {
+                    showCreate = true
+                }
+            ) {
+                Icon(
+                    Icons.Default.Add,
+                    "New session"
+                )
             }
         }
+
     ) { pad ->
 
         Column(
@@ -603,176 +964,356 @@ fun BroLikerApp() {
                 .padding(pad)
                 .padding(horizontal = 16.dp)
         ) {
-            Spacer(Modifier.height(8.dp))
 
-            // ── Search bar ────────────────────────────────────────────
-            OutlinedTextField(
-                value = query,
-                onValueChange = { query = it },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                label = { Text("Search by name or c_user...") },
-                leadingIcon = { Icon(Icons.Default.Search, null) },
-                trailingIcon = {
-                    if (query.isNotEmpty()) {
-                        IconButton(onClick = { query = "" }) { Icon(Icons.Default.Close, null) }
-                    }
-                },
-                shape = RoundedCornerShape(12.dp),
+            Spacer(
+                Modifier.height(8.dp)
             )
 
-            Spacer(Modifier.height(10.dp))
+            OutlinedTextField(
+                value = query,
 
-            // ── Group filter chips ────────────────────────────────────
+                onValueChange = {
+                    query = it
+                },
+
+                modifier =
+                    Modifier.fillMaxWidth(),
+
+                singleLine = true,
+
+                label = {
+                    Text(
+                        "Search by name or c_user..."
+                    )
+                },
+
+                leadingIcon = {
+                    Icon(
+                        Icons.Default.Search,
+                        null
+                    )
+                },
+
+                trailingIcon = {
+                    if (query.isNotEmpty()) {
+                        IconButton(
+                            onClick = {
+                                query = ""
+                            }
+                        ) {
+                            Icon(
+                                Icons.Default.Close,
+                                null
+                            )
+                        }
+                    }
+                },
+
+                shape =
+                    RoundedCornerShape(12.dp),
+            )
+
+            Spacer(
+                Modifier.height(10.dp)
+            )
+
             LazyRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                contentPadding = PaddingValues(vertical = 4.dp),
+                horizontalArrangement =
+                    Arrangement.spacedBy(8.dp),
+
+                contentPadding =
+                    PaddingValues(vertical = 4.dp),
             ) {
                 items(groups) { group ->
-                    val count = when (group) {
-                        "All" -> sessions.count { !it.archived }
-                        "Ungrouped" -> sessions.count { !it.archived && it.group.isBlank() }
-                        else -> sessions.count { !it.archived && it.group == group }
-                    }
+
+                    val count =
+                        when (group) {
+
+                            "All" ->
+                                sessions.count {
+                                    !it.archived
+                                }
+
+                            "Ungrouped" ->
+                                sessions.count {
+                                    !it.archived &&
+                                        it.group.isBlank()
+                                }
+
+                            else ->
+                                sessions.count {
+                                    !it.archived &&
+                                        it.group == group
+                                }
+                        }
+
                     FilterChip(
-                        selected = filter == group,
-                        onClick = { filter = group },
-                        label = { Text("$group ($count)") },
-                        leadingIcon = if (filter == group) {
-                            { Icon(Icons.Default.Check, null, Modifier.size(16.dp)) }
-                        } else null,
+                        selected =
+                            filter == group,
+
+                        onClick = {
+                            filter = group
+                        },
+
+                        label = {
+                            Text(
+                                "$group ($count)"
+                            )
+                        },
+
+                        leadingIcon =
+                            if (filter == group) {
+                                {
+                                    Icon(
+                                        Icons.Default.Check,
+                                        null,
+                                        Modifier.size(16.dp)
+                                    )
+                                }
+                            } else {
+                                null
+                            },
                     )
                 }
             }
 
-            Spacer(Modifier.height(8.dp))
+            Spacer(
+                Modifier.height(8.dp)
+            )
 
-            // ── Selection action bar ──────────────────────────────────
             if (selectedIds.isNotEmpty()) {
+
                 Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer
-                    ),
-                    modifier = Modifier.fillMaxWidth(),
+                    colors =
+                        CardDefaults.cardColors(
+                            containerColor =
+                                MaterialTheme
+                                    .colorScheme
+                                    .primaryContainer
+                        ),
+
+                    modifier =
+                        Modifier.fillMaxWidth(),
                 ) {
+
                     Row(
                         Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+                            .padding(
+                                horizontal = 8.dp,
+                                vertical = 4.dp
+                            ),
+
+                        verticalAlignment =
+                            Alignment.CenterVertically,
                     ) {
+
                         Text(
                             "${selectedIds.size} selected",
-                            modifier = Modifier.weight(1f),
-                            fontWeight = FontWeight.SemiBold,
-                            fontSize = 13.sp,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier =
+                                Modifier.weight(1f),
+                            fontWeight =
+                                FontWeight.SemiBold,
                         )
-                        // ── Copy cookies for selected ─────────────────
-                        TextButton(onClick = {
-                            val toCopy = sessions.filter { it.id in selectedIds }
-                            copyMultiSessionCookies(context, toCopy, multiProfileSupported)
-                        }) {
-                            Icon(
-                                Icons.Default.ContentCopy,
-                                null,
-                                Modifier.size(16.dp),
-                            )
-                            Spacer(Modifier.width(4.dp))
-                            Text("Copy Cookies", fontSize = 12.sp)
-                        }
-                        TextButton(onClick = { showBulkGroup = true }) {
-                            Text("Group", fontSize = 12.sp)
-                        }
-                        TextButton(onClick = {
-                            sessions = sessions.filterNot { it.id in selectedIds }
-                            store.save(sessions)
-                            selectedIds = emptySet()
-                        }) {
-                            Text("Del", color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
-                        }
-                        IconButton(onClick = { selectedIds = emptySet() }, modifier = Modifier.size(32.dp)) {
-                            Icon(Icons.Default.Close, null, Modifier.size(18.dp))
+
+                        TextButton(
+                            onClick = {
+                                selectedIds =
+                                    emptySet()
+                            }
+                        ) {
+                            Text("Clear")
                         }
                     }
                 }
-                Spacer(Modifier.height(6.dp))
+
+                Spacer(
+                    Modifier.height(8.dp)
+                )
             }
 
-            // ── Session list ──────────────────────────────────────────
             if (filtered.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+
+                Box(
+                    Modifier.fillMaxSize(),
+                    contentAlignment =
+                        Alignment.Center
+                ) {
+
+                    Column(
+                        horizontalAlignment =
+                            Alignment.CenterHorizontally
+                    ) {
+
                         Icon(
                             Icons.Default.Inbox,
                             null,
                             Modifier.size(64.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                            tint =
+                                MaterialTheme
+                                    .colorScheme
+                                    .onSurfaceVariant
+                                    .copy(alpha = 0.4f),
                         )
-                        Spacer(Modifier.height(12.dp))
+
+                        Spacer(
+                            Modifier.height(12.dp)
+                        )
+
                         Text(
-                            if (query.isNotBlank()) "No sessions found" else "No sessions yet",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            if (query.isNotBlank())
+                                "No sessions found"
+                            else
+                                "No sessions yet",
+
+                            style =
+                                MaterialTheme
+                                    .typography
+                                    .titleMedium,
+
+                            color =
+                                MaterialTheme
+                                    .colorScheme
+                                    .onSurfaceVariant,
                         )
+
                         if (query.isBlank()) {
-                            Spacer(Modifier.height(8.dp))
-                            Button(onClick = { showCreate = true }) {
-                                Icon(Icons.Default.Add, null)
-                                Spacer(Modifier.width(6.dp))
-                                Text("Create first session")
+
+                            Spacer(
+                                Modifier.height(8.dp)
+                            )
+
+                            Button(
+                                onClick = {
+                                    showCreate = true
+                                }
+                            ) {
+
+                                Icon(
+                                    Icons.Default.Add,
+                                    null
+                                )
+
+                                Spacer(
+                                    Modifier.width(6.dp)
+                                )
+
+                                Text(
+                                    "Create first session"
+                                )
                             }
                         }
                     }
                 }
+
             } else {
+
                 LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                    contentPadding = PaddingValues(bottom = 96.dp),
+                    verticalArrangement =
+                        Arrangement.spacedBy(8.dp),
+
+                    contentPadding =
+                        PaddingValues(bottom = 96.dp),
                 ) {
-                    items(pageItems, key = { it.id }) { session ->
+
+                    items(
+                        pageItems,
+                        key = { it.id }
+                    ) { session ->
+
                         SessionCard(
                             session = session,
-                            selected = session.id in selectedIds,
+
+                            selected =
+                                session.id in selectedIds,
+
                             onSelect = {
-                                selectedIds = if (session.id in selectedIds)
-                                    selectedIds - session.id
-                                else selectedIds + session.id
+
+                                selectedIds =
+                                    if (
+                                        session.id in selectedIds
+                                    ) {
+                                        selectedIds -
+                                            session.id
+                                    } else {
+                                        selectedIds +
+                                            session.id
+                                    }
                             },
+
                             onOpen = {
-                                val updated = sessions.map {
-                                    if (it.id == session.id)
-                                        it.copy(lastOpenedAt = System.currentTimeMillis())
-                                    else it
-                                }
+
+                                val updated =
+                                    sessions.map {
+                                        if (
+                                            it.id ==
+                                                session.id
+                                        ) {
+                                            it.copy(
+                                                lastOpenedAt =
+                                                    System.currentTimeMillis()
+                                            )
+                                        } else {
+                                            it
+                                        }
+                                    }
+
                                 sessions = updated
                                 store.save(updated)
-                                selected = updated.first { it.id == session.id }
-                            },
-                            onRename = { showRename = session },
-                            onDelete = {
-                                sessions = sessions.filterNot { it.id == session.id }
-                                store.save(sessions)
-                                if (WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
-                                    runCatching {
-                                        ProfileStore.getInstance().deleteProfile(session.profileName)
+
+                                selected =
+                                    updated.first {
+                                        it.id == session.id
                                     }
-                                }
                             },
+
+                            onRename = {
+                                showRename = session
+                            },
+
+                            onDelete = {
+
+                                // IMPORTANT:
+                                // Do not delete immediately.
+                                // Ask confirmation first.
+                                pendingDeleteIds =
+                                    setOf(session.id)
+                            },
+
                             onCopyCookies = {
-                                copyMultiSessionCookies(context, listOf(session), multiProfileSupported)
+                                copyMultiSessionCookies(
+                                    context,
+                                    listOf(session),
+                                    multiProfileSupported
+                                )
                             },
                         )
                     }
+
                     if (totalPages > 1) {
                         item {
-                            Spacer(Modifier.height(4.dp))
+
                             PaginationBar(
                                 current = safePage,
                                 total = totalPages,
-                                onPrev = { currentPage = (safePage - 1).coerceAtLeast(0) },
-                                onNext = { currentPage = (safePage + 1).coerceAtMost(totalPages - 1) },
-                                onPage = { currentPage = it },
+
+                                onPrev = {
+                                    currentPage =
+                                        (safePage - 1)
+                                            .coerceAtLeast(0)
+                                },
+
+                                onNext = {
+                                    currentPage =
+                                        (safePage + 1)
+                                            .coerceAtMost(
+                                                totalPages - 1
+                                            )
+                                },
+
+                                onPage = {
+                                    currentPage = it
+                                },
                             )
                         }
                     }
@@ -781,65 +1322,155 @@ fun BroLikerApp() {
         }
     }
 
-    // ── Dialogs ────────────────────────────────────────────────────────────
+    // ─── Dialogs ─────────────────────────────────────────────────────────────
 
     if (showCreate) {
-        val idx = store.nextColorIndex(sessions)
+
+        val idx =
+            store.nextColorIndex(sessions)
+
         CreateSessionDialog(
-            groups = sessions.map { it.group }.filter { it.isNotBlank() }.distinct().sorted(),
-            nextSerial = store.nextSerialNumber(sessions),
-            defaultColor = colorForIndex(idx),
-            onDismiss = { showCreate = false },
+            groups =
+                sessions
+                    .map { it.group }
+                    .filter { it.isNotBlank() }
+                    .distinct()
+                    .sorted(),
+
+            nextSerial =
+                store.nextSerialNumber(sessions),
+
+            defaultColor =
+                colorForIndex(idx),
+
+            onDismiss = {
+                showCreate = false
+            },
         ) { name, group, color ->
-            val profileName = "profile_${UUID.randomUUID()}"
-            val meta = SessionMeta(
-                id = UUID.randomUUID().toString(),
-                profileName = profileName,
-                name = name,
-                group = group,
-                createdAt = System.currentTimeMillis(),
-                color = color,
-            )
+
+            val profileName =
+                "profile_${UUID.randomUUID()}"
+
+            val meta =
+                SessionMeta(
+                    id = UUID.randomUUID().toString(),
+                    profileName = profileName,
+                    name = name,
+                    group = group,
+                    createdAt = System.currentTimeMillis(),
+                    color = color,
+                )
+
             sessions = sessions + meta
             store.save(sessions)
+
             selected = meta
             showCreate = false
         }
     }
 
     showRename?.let { current ->
-        RenameDialog(current = current.name, onDismiss = { showRename = null }) { newName ->
-            sessions = sessions.map { if (it.id == current.id) it.copy(name = newName) else it }
+
+        RenameDialog(
+            current = current.name,
+
+            onDismiss = {
+                showRename = null
+            }
+
+        ) { newName ->
+
+            sessions =
+                sessions.map {
+
+                    if (it.id == current.id) {
+                        it.copy(
+                            name = newName
+                        )
+                    } else {
+                        it
+                    }
+                }
+
             store.save(sessions)
             showRename = null
         }
     }
 
     if (showGroupManager) {
+
         GroupManagerDialog(
             sessions = sessions,
+
             currentFilter = filter,
-            onDismiss = { showGroupManager = false },
-            onFilter = { filter = it; showGroupManager = false },
-            onRenameGroup = { old, new ->
-                sessions = sessions.map { if (it.group == old) it.copy(group = new) else it }
-                store.save(sessions)
-                if (filter == old) filter = new
+
+            onDismiss = {
+                showGroupManager = false
             },
-            onDeleteGroup = { groupName ->
-                sessions = sessions.map { if (it.group == groupName) it.copy(group = "") else it }
+
+            onFilter = {
+                filter = it
+                showGroupManager = false
+            },
+
+            onRenameGroup = { old, new ->
+
+                sessions =
+                    sessions.map {
+
+                        if (it.group == old) {
+                            it.copy(
+                                group = new
+                            )
+                        } else {
+                            it
+                        }
+                    }
+
                 store.save(sessions)
-                if (filter == groupName) filter = "All"
+
+                if (filter == old) {
+                    filter = new
+                }
+            },
+
+            onDeleteGroup = { groupName ->
+
+                // IMPORTANT:
+                // Group deletion also requires confirmation.
+                pendingDeleteGroup = groupName
             }
         )
     }
 
     if (showBulkGroup) {
+
         BulkGroupDialog(
-            groups = sessions.map { it.group }.filter { it.isNotBlank() }.distinct().sorted(),
-            onDismiss = { showBulkGroup = false },
+            groups =
+                sessions
+                    .map { it.group }
+                    .filter { it.isNotBlank() }
+                    .distinct()
+                    .sorted(),
+
+            onDismiss = {
+                showBulkGroup = false
+            },
+
         ) { group ->
-            sessions = sessions.map { if (it.id in selectedIds) it.copy(group = group) else it }
+
+            sessions =
+                sessions.map {
+
+                    if (it.id in selectedIds) {
+                        it.copy(
+                            group = group
+                        )
+                    } else {
+                        it
+                    }
+                }
+
             store.save(sessions)
             selectedIds = emptySet()
             showBulkGroup = false
@@ -847,16 +1478,273 @@ fun BroLikerApp() {
     }
 
     if (showSettings) {
+
         SettingsDialog(
-            sessionCount = sessions.count { !it.archived },
-            onDismiss = { showSettings = false },
+            sessionCount =
+                sessions.count {
+                    !it.archived
+                },
+
+            onDismiss = {
+                showSettings = false
+            },
+
             onExport = {
                 showSettings = false
-                exportLauncher.launch("broliker_backup_${System.currentTimeMillis()}.json")
+
+                exportLauncher.launch(
+                    "broliker_backup_${System.currentTimeMillis()}.json"
+                )
             },
+
             onImport = {
                 showSettings = false
-                importLauncher.launch(arrayOf("application/json", "*/*"))
+
+                importLauncher.launch(
+                    arrayOf(
+                        "application/json",
+                        "*/*"
+                    )
+                )
+            },
+        )
+    }
+
+    val activity =
+        context.findActivity()
+
+    // ─── Exit confirmation ───────────────────────────────────────────────────
+
+    if (showExitConfirmation) {
+
+        AlertDialog(
+            onDismissRequest = {
+                showExitConfirmation = false
+            },
+
+            title = {
+                Text("Exit Bro Liker?")
+            },
+
+            text = {
+                Text(
+                    "Are you sure you want to exit the app?"
+                )
+            },
+
+            confirmButton = {
+
+                TextButton(
+                    onClick = {
+
+                        showExitConfirmation = false
+
+                        activity?.finish()
+                    }
+                ) {
+                    Text("Exit")
+                }
+            },
+
+            dismissButton = {
+
+                TextButton(
+                    onClick = {
+                        showExitConfirmation = false
+                    }
+                ) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+
+    // ─── Delete session confirmation ─────────────────────────────────────────
+
+    pendingDeleteIds?.let { ids ->
+
+        val count = ids.size
+
+        AlertDialog(
+
+            onDismissRequest = {
+                pendingDeleteIds = null
+            },
+
+            title = {
+                Text(
+                    if (count == 1)
+                        "Delete session?"
+                    else
+                        "Delete selected sessions?"
+                )
+            },
+
+            text = {
+
+                Text(
+                    if (count == 1) {
+
+                        "This session will be deleted permanently. This action cannot be undone."
+
+                    } else {
+
+                        "$count sessions will be deleted permanently. This action cannot be undone."
+                    }
+                )
+            },
+
+            confirmButton = {
+
+                TextButton(
+                    onClick = {
+
+                        val idsToDelete =
+                            pendingDeleteIds
+                                ?: emptySet()
+
+                        val toDelete =
+                            sessions.filter {
+                                it.id in idsToDelete
+                            }
+
+                        sessions =
+                            sessions.filterNot {
+                                it.id in idsToDelete
+                            }
+
+                        store.save(sessions)
+
+                        selectedIds =
+                            selectedIds - idsToDelete
+
+                        pendingDeleteIds = null
+
+                        // Preserve the existing profile deletion behavior.
+                        if (multiProfileSupported) {
+
+                            toDelete.forEach { session ->
+
+                                runCatching {
+
+                                    ProfileStore
+                                        .getInstance()
+                                        .deleteProfile(
+                                            session.profileName
+                                        )
+                                }
+                            }
+                        }
+                    }
+                ) {
+
+                    Text(
+                        "Delete",
+                        color =
+                            MaterialTheme
+                                .colorScheme
+                                .error
+                    )
+                }
+            },
+
+            dismissButton = {
+
+                TextButton(
+                    onClick = {
+                        pendingDeleteIds = null
+                    }
+                ) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+
+    // ─── Delete group confirmation ───────────────────────────────────────────
+
+    pendingDeleteGroup?.let { groupName ->
+
+        val count =
+            sessions.count {
+                !it.archived &&
+                    it.group == groupName
+            }
+
+        AlertDialog(
+
+            onDismissRequest = {
+                pendingDeleteGroup = null
+            },
+
+            title = {
+                Text("Delete group?")
+            },
+
+            text = {
+
+                Text(
+
+                    if (count > 0) {
+
+                        "Delete the group '$groupName'? The $count sessions will be kept but moved to Ungrouped."
+
+                    } else {
+
+                        "Delete the group '$groupName'?"
+                    }
+                )
+            },
+
+            confirmButton = {
+
+                TextButton(
+                    onClick = {
+
+                        sessions =
+                            sessions.map {
+
+                                if (
+                                    it.group ==
+                                        groupName
+                                ) {
+                                    it.copy(
+                                        group = ""
+                                    )
+                                } else {
+                                    it
+                                }
+                            }
+
+                        store.save(sessions)
+
+                        if (filter == groupName) {
+                            filter = "All"
+                        }
+
+                        pendingDeleteGroup = null
+                    }
+                ) {
+
+                    Text(
+                        "Delete",
+                        color =
+                            MaterialTheme
+                                .colorScheme
+                                .error
+                    )
+                }
+            },
+
+            dismissButton = {
+
+                TextButton(
+                    onClick = {
+                        pendingDeleteGroup = null
+                    }
+                ) {
+                    Text("Cancel")
+                }
             },
         )
     }
@@ -872,55 +1760,133 @@ private fun PaginationBar(
     onNext: () -> Unit,
     onPage: (Int) -> Unit,
 ) {
-    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
+
+    Card(
+        modifier =
+            Modifier.fillMaxWidth(),
+        shape =
+            RoundedCornerShape(12.dp)
+    ) {
+
         Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center,
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp),
+
+            verticalAlignment =
+                Alignment.CenterVertically,
         ) {
-            IconButton(onClick = onPrev, enabled = current > 0) {
-                Icon(Icons.Default.ChevronLeft, "Prev")
+
+            IconButton(
+                onClick = onPrev,
+                enabled = current > 0
+            ) {
+                Icon(
+                    Icons.Default.ChevronLeft,
+                    "Previous"
+                )
             }
-            val range = ((current - 2).coerceAtLeast(0)..(current + 2).coerceAtMost(total - 1))
-            if (range.first > 0) {
-                PageChip(0, current, onPage)
-                if (range.first > 1) Text("…", Modifier.padding(horizontal = 4.dp))
+
+            Row(
+                modifier =
+                    Modifier.weight(1f),
+
+                horizontalArrangement =
+                    Arrangement.Center
+            ) {
+
+                val start =
+                    (current - 2)
+                        .coerceAtLeast(0)
+
+                val end =
+                    (start + 5)
+                        .coerceAtMost(total)
+
+                for (page in start until end) {
+
+                    PageChip(
+                        page = page,
+                        current = current,
+                        onPage = onPage
+                    )
+                }
             }
-            range.forEach { p -> PageChip(p, current, onPage) }
-            if (range.last < total - 1) {
-                if (range.last < total - 2) Text("…", Modifier.padding(horizontal = 4.dp))
-                PageChip(total - 1, current, onPage)
-            }
-            IconButton(onClick = onNext, enabled = current < total - 1) {
-                Icon(Icons.Default.ChevronRight, "Next")
+
+            IconButton(
+                onClick = onNext,
+                enabled = current < total - 1
+            ) {
+                Icon(
+                    Icons.Default.ChevronRight,
+                    "Next"
+                )
             }
         }
     }
 }
 
 @Composable
-private fun PageChip(page: Int, current: Int, onPage: (Int) -> Unit) {
-    val sel = page == current
-    Box(
-        modifier = Modifier
-            .size(36.dp)
-            .clip(CircleShape)
-            .background(if (sel) MaterialTheme.colorScheme.primary else Color.Transparent)
-            .clickable { onPage(page) },
-        contentAlignment = Alignment.Center,
+private fun PageChip(
+    page: Int,
+    current: Int,
+    onPage: (Int) -> Unit,
+) {
+
+    Surface(
+        modifier =
+            Modifier
+                .padding(horizontal = 2.dp)
+                .clip(CircleShape)
+                .clickable {
+                    onPage(page)
+                },
+
+        color =
+            if (page == current)
+                MaterialTheme.colorScheme.primary
+            else
+                MaterialTheme
+                    .colorScheme
+                    .surfaceVariant,
+
+        shape =
+            CircleShape,
     ) {
-        Text(
-            "${page + 1}",
-            color = if (sel) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
-            fontWeight = if (sel) FontWeight.Bold else FontWeight.Normal,
-            fontSize = 13.sp,
-        )
+
+        Box(
+            modifier =
+                Modifier.size(36.dp),
+
+            contentAlignment =
+                Alignment.Center
+        ) {
+
+            Text(
+                "${page + 1}",
+
+                color =
+                    if (page == current)
+                        MaterialTheme
+                            .colorScheme
+                            .onPrimary
+                    else
+                        MaterialTheme
+                            .colorScheme
+                            .onSurfaceVariant,
+
+                fontWeight =
+                    if (page == current)
+                        FontWeight.Bold
+                    else
+                        FontWeight.Normal,
+            )
+        }
     }
 }
 
-// ─── Session Card ─────────────────────────────────────────────────────────────
+// ─── Session card ─────────────────────────────────────────────────────────────
 
 @Composable
 private fun SessionCard(
@@ -932,113 +1898,232 @@ private fun SessionCard(
     onDelete: () -> Unit,
     onCopyCookies: () -> Unit,
 ) {
-    val sessionColor = hexToColor(session.color)
+
+    var showMenu by remember {
+        mutableStateOf(false)
+    }
 
     Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = if (selected)
-                MaterialTheme.colorScheme.secondaryContainer
-            else
-                MaterialTheme.colorScheme.surfaceVariant,
-        ),
-    ) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Checkbox(checked = selected, onCheckedChange = { onSelect() })
+        modifier =
+            Modifier.fillMaxWidth(),
 
-            // Color avatar
-            Box(
+        colors =
+            CardDefaults.cardColors(
+                containerColor =
+                    if (selected)
+                        MaterialTheme
+                            .colorScheme
+                            .secondaryContainer
+                    else
+                        MaterialTheme
+                            .colorScheme
+                            .surface
+            ),
+
+        shape =
+            RoundedCornerShape(14.dp),
+    ) {
+
+        Row(
+            modifier =
                 Modifier
-                    .size(42.dp)
-                    .background(sessionColor, RoundedCornerShape(10.dp)),
-                contentAlignment = Alignment.Center,
+                    .fillMaxWidth()
+                    .padding(
+                        horizontal = 12.dp,
+                        vertical = 10.dp
+                    ),
+
+            verticalAlignment =
+                Alignment.CenterVertically,
+        ) {
+
+            Checkbox(
+                checked = selected,
+                onCheckedChange = {
+                    onSelect()
+                }
+            )
+
+            Box(
+                modifier =
+                    Modifier
+                        .size(42.dp)
+                        .background(
+                            hexToColor(session.color),
+                            CircleShape
+                        )
             ) {
+
                 Text(
-                    session.name.take(1).uppercase(),
+                    session.name
+                        .take(1)
+                        .uppercase(),
+
+                    modifier =
+                        Modifier.align(
+                            Alignment.Center
+                        ),
+
                     color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 18.sp,
+
+                    fontWeight =
+                        FontWeight.Bold
                 )
             }
 
-            Spacer(Modifier.width(10.dp))
+            Spacer(
+                Modifier.width(10.dp)
+            )
 
-            Column(Modifier.weight(1f)) {
+            Column(
+                modifier =
+                    Modifier.weight(1f)
+            ) {
+
                 Text(
                     session.name,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
+
+                    fontWeight =
+                        FontWeight.SemiBold,
+
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+
+                    overflow =
+                        TextOverflow.Ellipsis
                 )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        Modifier
-                            .size(8.dp)
-                            .background(
-                                if (session.group.isNotBlank()) MaterialTheme.colorScheme.tertiary
-                                else MaterialTheme.colorScheme.outline,
-                                CircleShape,
-                            )
-                    )
-                    Spacer(Modifier.width(4.dp))
+
+                if (session.group.isNotBlank()) {
+
                     Text(
-                        if (session.group.isBlank()) "Ungrouped" else session.group,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        session.group,
+
+                        style =
+                            MaterialTheme
+                                .typography
+                                .labelSmall,
+
+                        color =
+                            MaterialTheme
+                                .colorScheme
+                                .onSurfaceVariant
+                    )
+                }
+
+                if (session.cachedCUser.isNotBlank()) {
+
+                    Text(
+                        "c_user: ${session.cachedCUser}",
+
+                        style =
+                            MaterialTheme
+                                .typography
+                                .labelSmall,
+
+                        color =
+                            MaterialTheme
+                                .colorScheme
+                                .onSurfaceVariant,
+
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
+
+                        overflow =
+                            TextOverflow.Ellipsis
                     )
-                    // Show c_user hint if cached
-                    if (session.cachedCUser.isNotEmpty()) {
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            "·${session.cachedCUser.takeLast(6)}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                        )
-                    }
                 }
             }
 
-            Button(
-                onClick = onOpen,
-                shape = RoundedCornerShape(8.dp),
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+            TextButton(
+                onClick = onOpen
             ) {
-                Text("Open", fontSize = 13.sp)
+                Text("Open")
             }
 
-            Spacer(Modifier.width(2.dp))
-
-            var showMenu by remember { mutableStateOf(false) }
             Box {
-                IconButton(onClick = { showMenu = true }) {
-                    Icon(Icons.Default.MoreVert, null)
+
+                IconButton(
+                    onClick = {
+                        showMenu = true
+                    }
+                ) {
+
+                    Icon(
+                        Icons.Default.MoreVert,
+                        "Session menu"
+                    )
                 }
-                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+
+                DropdownMenu(
+                    expanded = showMenu,
+
+                    onDismissRequest = {
+                        showMenu = false
+                    }
+                ) {
+
                     DropdownMenuItem(
-                        text = { Text("Copy Cookies") },
-                        leadingIcon = { Icon(Icons.Default.ContentCopy, null) },
-                        onClick = { showMenu = false; onCopyCookies() }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Rename") },
-                        leadingIcon = { Icon(Icons.Default.Edit, null) },
-                        onClick = { showMenu = false; onRename() }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Delete", color = MaterialTheme.colorScheme.error) },
-                        leadingIcon = {
-                            Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error)
+                        text = {
+                            Text("Rename")
                         },
-                        onClick = { showMenu = false; onDelete() }
+
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.Edit,
+                                null
+                            )
+                        },
+
+                        onClick = {
+                            showMenu = false
+                            onRename()
+                        }
+                    )
+
+                    DropdownMenuItem(
+                        text = {
+                            Text("Copy Cookies")
+                        },
+
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.ContentCopy,
+                                null
+                            )
+                        },
+
+                        onClick = {
+                            showMenu = false
+                            onCopyCookies()
+                        }
+                    )
+
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                "Delete",
+                                color =
+                                    MaterialTheme
+                                        .colorScheme
+                                        .error
+                            )
+                        },
+
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.Delete,
+                                null,
+                                tint =
+                                    MaterialTheme
+                                        .colorScheme
+                                        .error
+                            )
+                        },
+
+                        onClick = {
+
+                            // Confirmation is handled by parent.
+                            showMenu = false
+                            onDelete()
+                        }
                     )
                 }
             }
@@ -1056,101 +2141,267 @@ private fun CreateSessionDialog(
     onDismiss: () -> Unit,
     onCreate: (String, String, String) -> Unit,
 ) {
-    var name by remember { mutableStateOf("My Session $nextSerial") }
-    var group by remember { mutableStateOf("") }
-    var showGroupSuggestions by remember { mutableStateOf(false) }
+
+    var name by remember {
+        mutableStateOf(
+            "My Session $nextSerial"
+        )
+    }
+
+    var group by remember {
+        mutableStateOf("")
+    }
+
+    var showGroupSuggestions by remember {
+        mutableStateOf(false)
+    }
 
     AlertDialog(
+
         onDismissRequest = onDismiss,
-        title = { Text("New Session") },
+
+        title = {
+            Text("New Session")
+        },
+
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+
+            Column(
+                verticalArrangement =
+                    Arrangement.spacedBy(12.dp)
+            ) {
+
                 OutlinedTextField(
-                    name, { name = it },
-                    label = { Text("Session name") },
+                    name,
+                    {
+                        name = it
+                    },
+
+                    label = {
+                        Text("Session name")
+                    },
+
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
+
+                    modifier =
+                        Modifier.fillMaxWidth(),
                 )
+
                 OutlinedTextField(
-                    group, { group = it },
-                    label = { Text("Group (optional)") },
+                    group,
+                    {
+                        group = it
+                    },
+
+                    label = {
+                        Text("Group (optional)")
+                    },
+
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    trailingIcon = if (groups.isNotEmpty()) {
-                        {
-                            IconButton(onClick = { showGroupSuggestions = !showGroupSuggestions }) {
-                                Icon(Icons.Default.ArrowDropDown, null)
+
+                    modifier =
+                        Modifier.fillMaxWidth(),
+
+                    trailingIcon =
+                        if (groups.isNotEmpty()) {
+
+                            {
+                                IconButton(
+                                    onClick = {
+                                        showGroupSuggestions =
+                                            !showGroupSuggestions
+                                    }
+                                ) {
+
+                                    Icon(
+                                        Icons.Default.ArrowDropDown,
+                                        null
+                                    )
+                                }
                             }
-                        }
-                    } else null,
+
+                        } else {
+                            null
+                        },
                 )
-                if (showGroupSuggestions && groups.isNotEmpty()) {
-                    Card(modifier = Modifier.fillMaxWidth()) {
+
+                if (
+                    showGroupSuggestions &&
+                    groups.isNotEmpty()
+                ) {
+
+                    Card(
+                        modifier =
+                            Modifier.fillMaxWidth()
+                    ) {
+
                         Column {
+
                             groups.forEach { g ->
+
                                 Text(
                                     g,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { group = g; showGroupSuggestions = false }
-                                        .padding(12.dp),
+
+                                    modifier =
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                group = g
+                                                showGroupSuggestions =
+                                                    false
+                                            }
+                                            .padding(12.dp),
                                 )
+
                                 HorizontalDivider()
                             }
                         }
                     }
                 }
-                // Color preview
-                Row(verticalAlignment = Alignment.CenterVertically) {
+
+                Row(
+                    verticalAlignment =
+                        Alignment.CenterVertically
+                ) {
+
                     Box(
                         Modifier
                             .size(24.dp)
-                            .background(hexToColor(defaultColor), CircleShape)
+                            .background(
+                                hexToColor(
+                                    defaultColor
+                                ),
+                                CircleShape
+                            )
                     )
-                    Spacer(Modifier.width(8.dp))
+
+                    Spacer(
+                        Modifier.width(8.dp)
+                    )
+
                     Text(
                         "Auto color assigned",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+
+                        style =
+                            MaterialTheme
+                                .typography
+                                .bodySmall,
+
+                        color =
+                            MaterialTheme
+                                .colorScheme
+                                .onSurfaceVariant,
                     )
                 }
+
                 Text(
                     "Each session has its own isolated browser profile.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+
+                    style =
+                        MaterialTheme
+                            .typography
+                            .bodySmall,
+
+                    color =
+                        MaterialTheme
+                            .colorScheme
+                            .onSurfaceVariant,
                 )
             }
         },
+
         confirmButton = {
+
             Button(
-                enabled = name.isNotBlank(),
-                onClick = { onCreate(name.trim(), group.trim(), defaultColor) }
-            ) { Text("Create & Open") }
+                enabled =
+                    name.isNotBlank(),
+
+                onClick = {
+                    onCreate(
+                        name.trim(),
+                        group.trim(),
+                        defaultColor
+                    )
+                }
+            ) {
+                Text("Create & Open")
+            }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+
+        dismissButton = {
+
+            TextButton(
+                onClick = onDismiss
+            ) {
+                Text("Cancel")
+            }
+        },
     )
 }
 
 // ─── Rename Dialog ────────────────────────────────────────────────────────────
 
 @Composable
-private fun RenameDialog(current: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
-    var value by remember { mutableStateOf(current) }
+private fun RenameDialog(
+    current: String,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
+) {
+
+    var value by remember {
+        mutableStateOf(current)
+    }
+
     AlertDialog(
+
         onDismissRequest = onDismiss,
-        title = { Text("Rename Session") },
+
+        title = {
+            Text("Rename Session")
+        },
+
         text = {
+
             OutlinedTextField(
-                value, { value = it },
+                value,
+
+                {
+                    value = it
+                },
+
                 singleLine = true,
-                label = { Text("Name") },
-                modifier = Modifier.fillMaxWidth(),
+
+                label = {
+                    Text("Name")
+                },
+
+                modifier =
+                    Modifier.fillMaxWidth(),
             )
         },
+
         confirmButton = {
-            Button(enabled = value.isNotBlank(), onClick = { onSave(value.trim()) }) { Text("Save") }
+
+            Button(
+                enabled =
+                    value.isNotBlank(),
+
+                onClick = {
+                    onSave(value.trim())
+                }
+            ) {
+                Text("Save")
+            }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+
+        dismissButton = {
+
+            TextButton(
+                onClick = onDismiss
+            ) {
+                Text("Cancel")
+            }
+        },
     )
 }
 
@@ -1165,88 +2416,252 @@ private fun GroupManagerDialog(
     onRenameGroup: (String, String) -> Unit,
     onDeleteGroup: (String) -> Unit,
 ) {
-    val groups = sessions.map { it.group }.filter { it.isNotBlank() }.distinct().sorted()
-    var renamingGroup by remember { mutableStateOf<String?>(null) }
-    var renameValue by remember { mutableStateOf("") }
+
+    val groups =
+        sessions
+            .map { it.group }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .sorted()
+
+    var renamingGroup by remember {
+        mutableStateOf<String?>(null)
+    }
+
+    var renameValue by remember {
+        mutableStateOf("")
+    }
 
     AlertDialog(
+
         onDismissRequest = onDismiss,
+
         title = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.AccountTree, null)
-                Spacer(Modifier.width(8.dp))
+
+            Row(
+                verticalAlignment =
+                    Alignment.CenterVertically
+            ) {
+
+                Icon(
+                    Icons.Default.AccountTree,
+                    null
+                )
+
+                Spacer(
+                    Modifier.width(8.dp)
+                )
+
                 Text("Manage Groups")
             }
         },
+
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+
+            Column(
+                verticalArrangement =
+                    Arrangement.spacedBy(4.dp)
+            ) {
+
                 GroupRow(
                     name = "All Sessions",
-                    count = sessions.count { !it.archived },
-                    isSelected = currentFilter == "All",
-                    icon = Icons.Default.GridView,
-                    onClick = { onFilter("All") },
+
+                    count =
+                        sessions.count {
+                            !it.archived
+                        },
+
+                    isSelected =
+                        currentFilter == "All",
+
+                    icon =
+                        Icons.Default.GridView,
+
+                    onClick = {
+                        onFilter("All")
+                    },
+
                     canEdit = false,
                 )
+
                 GroupRow(
                     name = "Ungrouped",
-                    count = sessions.count { !it.archived && it.group.isBlank() },
-                    isSelected = currentFilter == "Ungrouped",
-                    icon = Icons.Default.FolderOpen,
-                    onClick = { onFilter("Ungrouped") },
+
+                    count =
+                        sessions.count {
+                            !it.archived &&
+                                it.group.isBlank()
+                        },
+
+                    isSelected =
+                        currentFilter == "Ungrouped",
+
+                    icon =
+                        Icons.Default.FolderOpen,
+
+                    onClick = {
+                        onFilter("Ungrouped")
+                    },
+
                     canEdit = false,
                 )
+
                 if (groups.isNotEmpty()) {
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                    HorizontalDivider(
+                        modifier =
+                            Modifier.padding(
+                                vertical = 4.dp
+                            )
+                    )
+
                     Text(
                         "Your Groups",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+
+                        style =
+                            MaterialTheme
+                                .typography
+                                .labelMedium,
+
+                        color =
+                            MaterialTheme
+                                .colorScheme
+                                .onSurfaceVariant,
                     )
                 }
+
                 groups.forEach { group ->
+
                     if (renamingGroup == group) {
+
                         OutlinedTextField(
-                            value = renameValue,
-                            onValueChange = { renameValue = it },
+
+                            value =
+                                renameValue,
+
+                            onValueChange = {
+                                renameValue = it
+                            },
+
                             singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
+
+                            modifier =
+                                Modifier.fillMaxWidth(),
+
                             trailingIcon = {
+
                                 Row {
-                                    IconButton(onClick = {
-                                        if (renameValue.isNotBlank()) onRenameGroup(group, renameValue.trim())
-                                        renamingGroup = null
-                                    }) { Icon(Icons.Default.Check, null) }
-                                    IconButton(onClick = { renamingGroup = null }) {
-                                        Icon(Icons.Default.Close, null)
+
+                                    IconButton(
+                                        onClick = {
+
+                                            if (
+                                                renameValue
+                                                    .isNotBlank()
+                                            ) {
+                                                onRenameGroup(
+                                                    group,
+                                                    renameValue
+                                                        .trim()
+                                                )
+                                            }
+
+                                            renamingGroup =
+                                                null
+                                        }
+                                    ) {
+
+                                        Icon(
+                                            Icons.Default.Check,
+                                            null
+                                        )
+                                    }
+
+                                    IconButton(
+                                        onClick = {
+                                            renamingGroup =
+                                                null
+                                        }
+                                    ) {
+
+                                        Icon(
+                                            Icons.Default.Close,
+                                            null
+                                        )
                                     }
                                 }
                             }
                         )
+
                     } else {
+
                         GroupRow(
+
                             name = group,
-                            count = sessions.count { !it.archived && it.group == group },
-                            isSelected = currentFilter == group,
-                            icon = Icons.Default.Folder,
-                            onClick = { onFilter(group) },
+
+                            count =
+                                sessions.count {
+                                    !it.archived &&
+                                        it.group == group
+                                },
+
+                            isSelected =
+                                currentFilter == group,
+
+                            icon =
+                                Icons.Default.Folder,
+
+                            onClick = {
+                                onFilter(group)
+                            },
+
                             canEdit = true,
-                            onEdit = { renamingGroup = group; renameValue = group },
-                            onDelete = { onDeleteGroup(group) },
+
+                            onEdit = {
+                                renamingGroup = group
+                                renameValue = group
+                            },
+
+                            // The parent displays the
+                            // mandatory confirmation dialog.
+                            onDelete = {
+                                onDeleteGroup(group)
+                            },
                         )
                     }
                 }
+
                 if (groups.isEmpty()) {
-                    Spacer(Modifier.height(8.dp))
+
+                    Spacer(
+                        Modifier.height(8.dp)
+                    )
+
                     Text(
                         "No groups yet.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+
+                        style =
+                            MaterialTheme
+                                .typography
+                                .bodySmall,
+
+                        color =
+                            MaterialTheme
+                                .colorScheme
+                                .onSurfaceVariant,
                     )
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+
+        confirmButton = {
+
+            TextButton(
+                onClick = onDismiss
+            ) {
+                Text("Close")
+            }
+        },
     )
 }
 
@@ -1261,38 +2676,111 @@ private fun GroupRow(
     onEdit: (() -> Unit)? = null,
     onDelete: (() -> Unit)? = null,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
-            .background(
-                if (isSelected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent
-            )
-            .clickable { onClick() }
-            .padding(horizontal = 8.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
+
+    Card(
+        modifier =
+            Modifier.fillMaxWidth(),
+
+        colors =
+            CardDefaults.cardColors(
+                containerColor =
+                    if (isSelected)
+                        MaterialTheme
+                            .colorScheme
+                            .secondaryContainer
+                    else
+                        MaterialTheme
+                            .colorScheme
+                            .surface
+            ),
     ) {
-        Icon(
-            icon, null, Modifier.size(20.dp),
-            tint = if (isSelected) MaterialTheme.colorScheme.primary
-            else MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.width(10.dp))
-        Text(
-            name, modifier = Modifier.weight(1f),
-            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-            color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
-            else MaterialTheme.colorScheme.onSurface,
-        )
-        Text("$count", style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant)
-        if (canEdit) {
-            IconButton(onClick = { onEdit?.invoke() }, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Default.Edit, null, Modifier.size(16.dp))
+
+        Row(
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onClick)
+                    .padding(
+                        horizontal = 12.dp,
+                        vertical = 8.dp
+                    ),
+
+            verticalAlignment =
+                Alignment.CenterVertically,
+        ) {
+
+            Icon(
+                icon,
+                null
+            )
+
+            Spacer(
+                Modifier.width(8.dp)
+            )
+
+            Column(
+                modifier =
+                    Modifier.weight(1f)
+            ) {
+
+                Text(
+                    name,
+                    fontWeight =
+                        FontWeight.SemiBold
+                )
+
+                Text(
+                    "$count sessions",
+
+                    style =
+                        MaterialTheme
+                            .typography
+                            .labelSmall,
+
+                    color =
+                        MaterialTheme
+                            .colorScheme
+                            .onSurfaceVariant
+                )
             }
-            IconButton(onClick = { onDelete?.invoke() }, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Default.Delete, null, Modifier.size(16.dp),
-                    tint = MaterialTheme.colorScheme.error)
+
+            if (canEdit) {
+
+                IconButton(
+                    onClick = {
+                        onEdit?.invoke()
+                    },
+
+                    modifier =
+                        Modifier.size(32.dp)
+                ) {
+
+                    Icon(
+                        Icons.Default.Edit,
+                        null,
+                        Modifier.size(16.dp)
+                    )
+                }
+
+                IconButton(
+                    onClick = {
+                        onDelete?.invoke()
+                    },
+
+                    modifier =
+                        Modifier.size(32.dp)
+                ) {
+
+                    Icon(
+                        Icons.Default.Delete,
+                        null,
+                        Modifier.size(16.dp),
+                        tint =
+                            MaterialTheme
+                                .colorScheme
+                                .error
+                    )
+                }
             }
         }
     }
@@ -1304,40 +2792,80 @@ private fun GroupRow(
 private fun BulkGroupDialog(
     groups: List<String>,
     onDismiss: () -> Unit,
-    onApply: (String) -> Unit,
+    onMove: (String) -> Unit,
 ) {
-    var group by remember { mutableStateOf("") }
+
+    var selectedGroup by remember {
+        mutableStateOf(
+            groups.firstOrNull() ?: ""
+        )
+    }
+
     AlertDialog(
+
         onDismissRequest = onDismiss,
-        title = { Text("Move to Group") },
+
+        title = {
+            Text("Move selected sessions")
+        },
+
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    group, { group = it },
-                    label = { Text("Group name") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                if (groups.isNotEmpty()) {
-                    Text("Pick existing:", style = MaterialTheme.typography.labelMedium)
-                    groups.forEach { existing ->
-                        Text(
-                            existing,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(6.dp))
-                                .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(6.dp))
-                                .clickable { group = existing }
-                                .padding(10.dp),
-                        )
-                    }
+
+            Column(
+                verticalArrangement =
+                    Arrangement.spacedBy(8.dp)
+            ) {
+
+                groups.forEach { group ->
+
+                    FilterChip(
+                        selected =
+                            selectedGroup == group,
+
+                        onClick = {
+                            selectedGroup = group
+                        },
+
+                        label = {
+                            Text(group)
+                        }
+                    )
                 }
+
+                FilterChip(
+                    selected =
+                        selectedGroup.isBlank(),
+
+                    onClick = {
+                        selectedGroup = ""
+                    },
+
+                    label = {
+                        Text("Ungrouped")
+                    }
+                )
             }
         },
+
         confirmButton = {
-            Button(enabled = group.isNotBlank(), onClick = { onApply(group.trim()) }) { Text("Move") }
+
+            Button(
+                onClick = {
+                    onMove(selectedGroup)
+                }
+            ) {
+                Text("Move")
+            }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+
+        dismissButton = {
+
+            TextButton(
+                onClick = onDismiss
+            ) {
+                Text("Cancel")
+            }
+        },
     )
 }
 
@@ -1350,62 +2878,78 @@ private fun SettingsDialog(
     onExport: () -> Unit,
     onImport: () -> Unit,
 ) {
+
     AlertDialog(
+
         onDismissRequest = onDismiss,
+
         title = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.Settings, null)
-                Spacer(Modifier.width(8.dp))
-                Text("Settings")
-            }
+            Text("Settings")
         },
+
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
-                    Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Info, null, tint = MaterialTheme.colorScheme.primary)
-                        Spacer(Modifier.width(8.dp))
-                        Text("$sessionCount sessions saved", fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer)
-                    }
-                }
-                HorizontalDivider()
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Backup & Restore", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                    Text(
-                        "Export saves all sessions with cookies. Import merges without overwriting.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+
+            Column(
+                verticalArrangement =
+                    Arrangement.spacedBy(12.dp)
+            ) {
+
+                Text(
+                    "Sessions: $sessionCount"
+                )
+
+                Button(
+                    onClick = onExport,
+                    modifier =
+                        Modifier.fillMaxWidth()
+                ) {
+
+                    Icon(
+                        Icons.Default.Upload,
+                        null
                     )
+
+                    Spacer(
+                        Modifier.width(8.dp)
+                    )
+
+                    Text("Export Backup")
                 }
-                Button(onClick = onExport, modifier = Modifier.fillMaxWidth()) {
-                    Icon(Icons.Default.Upload, null); Spacer(Modifier.width(8.dp)); Text("Export Backup (.json)")
-                }
-                OutlinedButton(onClick = onImport, modifier = Modifier.fillMaxWidth()) {
-                    Icon(Icons.Default.Download, null); Spacer(Modifier.width(8.dp)); Text("Import Backup (.json)")
-                }
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)) {
-                    Row(Modifier.padding(10.dp)) {
-                        Icon(Icons.Default.Warning, null, Modifier.size(16.dp),
-                            tint = MaterialTheme.colorScheme.tertiary)
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            "Cookie restore works best on the same device & IP.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onTertiaryContainer,
-                        )
-                    }
+
+                Button(
+                    onClick = onImport,
+                    modifier =
+                        Modifier.fillMaxWidth()
+                ) {
+
+                    Icon(
+                        Icons.Default.Download,
+                        null
+                    )
+
+                    Spacer(
+                        Modifier.width(8.dp)
+                    )
+
+                    Text("Import Backup")
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+
+        confirmButton = {
+
+            TextButton(
+                onClick = onDismiss
+            ) {
+                Text("Close")
+            }
+        }
     )
 }
 
-// ─── Browser Screen ───────────────────────────────────────────────────────────
+// ─── Browser screen ───────────────────────────────────────────────────────────
 
 @SuppressLint("SetJavaScriptEnabled")
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun BrowserScreen(
     session: SessionMeta,
@@ -1414,281 +2958,826 @@ private fun BrowserScreen(
     onCreateAnother: () -> Unit,
     onCUserDetected: (String) -> Unit,
 ) {
-    val context = LocalContext.current
-    var rootRef by remember { mutableStateOf<FrameLayout?>(null) }
-    var activeWebView by remember { mutableStateOf<WebView?>(null) }
-    var canBack by remember { mutableStateOf(false) }
-    var canForward by remember { mutableStateOf(false) }
-    var showMenu by remember { mutableStateOf(false) }
-    var currentUrl by remember { mutableStateOf(HOME_URL) }
-    var urlBarText by remember { mutableStateOf(HOME_URL) }
-    var loadingProgress by remember { mutableIntStateOf(0) }
-    var isLoading by remember { mutableStateOf(true) }
-    var errorMsg by remember { mutableStateOf<String?>(null) }
-    var pageTitle by remember { mutableStateOf("Facebook") }
 
-    fun profileStore() = ProfileStore.getInstance()
+    val context =
+        LocalContext.current
 
-    fun configureProfile(webView: WebView) {
-        if (multiProfileSupported) {
-            runCatching {
-                profileStore().getOrCreateProfile(session.profileName)
-                WebViewCompat.setProfile(webView, session.profileName)
-            }
-        }
-        webView.settings.apply {
+    var currentUrl by remember {
+        mutableStateOf(HOME_URL)
+    }
+
+    var urlBarText by remember {
+        mutableStateOf(HOME_URL)
+    }
+
+    var pageTitle by remember {
+        mutableStateOf("Facebook")
+    }
+
+    var isLoading by remember {
+        mutableStateOf(true)
+    }
+
+    var loadingProgress by remember {
+        mutableIntStateOf(0)
+    }
+
+    var canBack by remember {
+        mutableStateOf(false)
+    }
+
+    var canForward by remember {
+        mutableStateOf(false)
+    }
+
+    var errorMsg by remember {
+        mutableStateOf<String?>(null)
+    }
+
+    var showMenu by remember {
+        mutableStateOf(false)
+    }
+
+    var activeWebView by remember {
+        mutableStateOf<WebView?>(null)
+    }
+
+    var rootRef by remember {
+        mutableStateOf<FrameLayout?>(null)
+    }
+
+    fun configureProfile(web: WebView) {
+
+        web.settings.apply {
+
             javaScriptEnabled = true
+
             domStorageEnabled = true
+
             databaseEnabled = true
-            javaScriptCanOpenWindowsAutomatically = true
-            setSupportMultipleWindows(true)
+
             loadsImagesAutomatically = true
-            blockNetworkImage = false
-            blockNetworkLoads = false
+
             useWideViewPort = true
-            loadWithOverviewMode = true
-            builtInZoomControls = true
+
+            loadWithOverviewMode = false
+
+            builtInZoomControls = false
+
             displayZoomControls = false
-            setSupportZoom(true)
-            allowFileAccess = true
-            allowContentAccess = true
-            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+
             mediaPlaybackRequiresUserGesture = false
-            cacheMode = WebSettings.LOAD_DEFAULT
+
+            cacheMode =
+                WebSettings.LOAD_DEFAULT
+
+            userAgentString =
+                WebSettings
+                    .getDefaultUserAgent(context)
         }
-        if (multiProfileSupported) {
-            runCatching {
-                profileStore().getProfile(session.profileName)?.cookieManager?.apply {
-                    setAcceptCookie(true)
-                    setAcceptThirdPartyCookies(webView, true)
-                }
-            }
-        } else {
-            CookieManager.getInstance().apply {
-                setAcceptCookie(true)
-                setAcceptThirdPartyCookies(webView, true)
-            }
-        }
+
+        web.setLayerType(
+            android.view.View.LAYER_TYPE_HARDWARE,
+            null
+        )
     }
 
     fun flushAndDetectCUser() {
-        if (multiProfileSupported) {
-            runCatching {
-                profileStore().getProfile(session.profileName)?.cookieManager?.flush()
-            }
-        } else {
-            CookieManager.getInstance().flush()
+
+        runCatching {
+
+            val mgr =
+                if (multiProfileSupported) {
+
+                    ProfileStore
+                        .getInstance()
+                        .getProfile(
+                            session.profileName
+                        )
+                        ?.cookieManager
+
+                } else {
+                    CookieManager.getInstance()
+                }
+
+            mgr?.flush()
         }
-        // Detect c_user and cache it
-        val cookies = collectCookiesForSession(session, multiProfileSupported)
-        val cUser = cookies["c_user"]
-        if (!cUser.isNullOrBlank() && cUser != session.cachedCUser) {
-            onCUserDetected(cUser)
+
+        runCatching {
+
+            val cookieMap =
+                collectCookiesForSession(
+                    session,
+                    multiProfileSupported,
+                    currentUrl
+                )
+
+            val cUser =
+                cookieMap["c_user"]
+                    .orEmpty()
+
+            if (cUser.isNotBlank()) {
+                onCUserDetected(cUser)
+            }
         }
     }
 
-    fun makeClient(webView: WebView): WebViewClient = object : WebViewClient() {
-        override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) = false
-        override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
-            currentUrl = url; urlBarText = url; isLoading = true; errorMsg = null
-            canBack = view.canGoBack(); canForward = view.canGoForward()
-        }
-        override fun onPageFinished(view: WebView, url: String) {
-            currentUrl = url; urlBarText = url; isLoading = false
-            canBack = view.canGoBack(); canForward = view.canGoForward()
-            flushAndDetectCUser()
-        }
-        override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
-            if (request.isForMainFrame) {
+    fun makeClient(
+        web: WebView
+    ): WebViewClient =
+        object : WebViewClient() {
+
+            override fun shouldOverrideUrlLoading(
+                view: WebView,
+                request: WebResourceRequest,
+            ): Boolean {
+
+                return false
+            }
+
+            override fun onPageStarted(
+                view: WebView,
+                url: String,
+                favicon: Bitmap?,
+            ) {
+
+                currentUrl = url
+                urlBarText = url
+                isLoading = true
+                errorMsg = null
+
+                canBack =
+                    view.canGoBack()
+
+                canForward =
+                    view.canGoForward()
+            }
+
+            override fun onPageFinished(
+                view: WebView,
+                url: String,
+            ) {
+
+                currentUrl = url
+                urlBarText = url
                 isLoading = false
-                errorMsg = "Error ${error.errorCode}: ${error.description}"
+
+                canBack =
+                    view.canGoBack()
+
+                canForward =
+                    view.canGoForward()
+
+                flushAndDetectCUser()
+            }
+
+            override fun onReceivedError(
+                view: WebView,
+                request: WebResourceRequest,
+                error: WebResourceError,
+            ) {
+
+                if (request.isForMainFrame) {
+
+                    isLoading = false
+
+                    errorMsg =
+                        "Error ${error.errorCode}: ${error.description}"
+                }
+            }
+
+            override fun onRenderProcessGone(
+                view: WebView,
+                detail:
+                    android.webkit.RenderProcessGoneDetail,
+            ): Boolean {
+
+                isLoading = false
+
+                errorMsg =
+                    if (detail.didCrash()) {
+                        "WebView crashed. Tap Reload."
+                    } else {
+                        "WebView stopped. Tap Reload."
+                    }
+
+                return true
             }
         }
-        override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
-            isLoading = false
-            errorMsg = if (detail.didCrash()) "WebView crashed. Tap Reload." else "WebView stopped. Tap Reload."
-            return true
-        }
-    }
 
-    fun makeChromeClient(webView: WebView): WebChromeClient = object : WebChromeClient() {
-        override fun onProgressChanged(view: WebView, newProgress: Int) {
-            loadingProgress = newProgress; isLoading = newProgress < 100
-            canBack = view.canGoBack(); canForward = view.canGoForward()
-        }
-        override fun onReceivedTitle(view: WebView, title: String) {
-            if (title.isNotBlank()) pageTitle = title
-        }
-        override fun onCreateWindow(view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message): Boolean {
-            val root = rootRef ?: return false
-            val child = WebView(view.context)
-            configureProfile(child)
-            child.webViewClient = makeClient(child)
-            child.webChromeClient = makeChromeClient(child)
-            child.layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
-            )
-            activeWebView?.visibility = android.view.View.GONE
-            root.addView(child); activeWebView = child
-            val transport = resultMsg.obj as? WebView.WebViewTransport ?: return false
-            transport.webView = child; resultMsg.sendToTarget()
-            return true
-        }
-    }
+    fun makeChromeClient(
+        webView: WebView
+    ): WebChromeClient =
+        object : WebChromeClient() {
 
-    fun navigateTo(input: String) {
-        val trimmed = input.trim()
+            override fun onProgressChanged(
+                view: WebView,
+                newProgress: Int,
+            ) {
+
+                loadingProgress =
+                    newProgress
+
+                isLoading =
+                    newProgress < 100
+
+                canBack =
+                    view.canGoBack()
+
+                canForward =
+                    view.canGoForward()
+            }
+
+            override fun onReceivedTitle(
+                view: WebView,
+                title: String,
+            ) {
+
+                if (title.isNotBlank()) {
+                    pageTitle = title
+                }
+            }
+
+            override fun onCreateWindow(
+                view: WebView,
+                isDialog: Boolean,
+                isUserGesture: Boolean,
+                resultMsg: Message,
+            ): Boolean {
+
+                val root =
+                    rootRef
+                        ?: return false
+
+                val child =
+                    WebView(view.context)
+
+                configureProfile(child)
+
+                child.webViewClient =
+                    makeClient(child)
+
+                child.webChromeClient =
+                    makeChromeClient(child)
+
+                child.layoutParams =
+                    FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+
+                activeWebView
+                    ?.visibility =
+                    android.view.View.GONE
+
+                root.addView(child)
+
+                activeWebView = child
+
+                val transport =
+                    resultMsg.obj
+                        as? WebView.WebViewTransport
+                        ?: return false
+
+                transport.webView = child
+                resultMsg.sendToTarget()
+
+                return true
+            }
+        }
+
+    fun navigateTo(
+        input: String
+    ) {
+
+        val trimmed =
+            input.trim()
+
         if (trimmed.isBlank()) return
-        val url = when {
-            trimmed.startsWith("https://", true) || trimmed.startsWith("http://", true) -> trimmed
-            trimmed.contains(".") -> "https://$trimmed"
-            else -> "https://www.google.com/search?q=" + URLEncoder.encode(trimmed, "UTF-8")
-        }
-        activeWebView?.loadUrl(url); urlBarText = url
+
+        val url =
+            when {
+
+                trimmed.startsWith(
+                    "https://",
+                    true
+                ) ||
+                    trimmed.startsWith(
+                        "http://",
+                        true
+                    ) ->
+                    trimmed
+
+                trimmed.contains(".") ->
+                    "https://$trimmed"
+
+                else ->
+                    "https://www.google.com/search?q=" +
+                        URLEncoder.encode(
+                            trimmed,
+                            "UTF-8"
+                        )
+            }
+
+        activeWebView?.loadUrl(url)
+
+        urlBarText = url
     }
 
     fun closePopupIfPossible(): Boolean {
-        val root = rootRef ?: return false
-        val current = activeWebView ?: return false
-        if (root.childCount <= 1) return false
-        root.removeView(current); current.stopLoading(); current.destroy()
-        val parent = root.getChildAt(root.childCount - 1) as? WebView
-        parent?.let {
-            it.visibility = android.view.View.VISIBLE; activeWebView = it
-            canBack = it.canGoBack(); canForward = it.canGoForward()
-            currentUrl = it.url ?: HOME_URL; urlBarText = currentUrl
+
+        val root =
+            rootRef
+                ?: return false
+
+        val current =
+            activeWebView
+                ?: return false
+
+        if (root.childCount <= 1) {
+            return false
         }
+
+        root.removeView(current)
+
+        current.stopLoading()
+        current.destroy()
+
+        val parent =
+            root.getChildAt(
+                root.childCount - 1
+            ) as? WebView
+
+        parent?.let {
+
+            it.visibility =
+                android.view.View.VISIBLE
+
+            activeWebView = it
+
+            canBack =
+                it.canGoBack()
+
+            canForward =
+                it.canGoForward()
+
+            currentUrl =
+                it.url
+                    ?: HOME_URL
+
+            urlBarText =
+                currentUrl
+        }
+
         return true
     }
 
+    // ─── System Back handling ────────────────────────────────────────────────
+    //
+    // 1. If a popup WebView is open -> close popup.
+    // 2. Otherwise if WebView has history -> go back in the WebView.
+    // 3. Otherwise leave the current session and return to session list.
+    //
+    BackHandler(enabled = true) {
+
+        when {
+
+            closePopupIfPossible() -> {
+                // Popup closed.
+            }
+
+            activeWebView?.canGoBack() == true -> {
+                activeWebView?.goBack()
+            }
+
+            else -> {
+                flushAndDetectCUser()
+                onBack()
+            }
+        }
+    }
+
     Scaffold(
-        contentWindowInsets = WindowInsets.safeDrawing,
+        contentWindowInsets =
+            WindowInsets.safeDrawing,
+
         topBar = {
+
             Column {
+
                 TopAppBar(
+
                     navigationIcon = {
-                        IconButton(onClick = {
-                            if (!closePopupIfPossible()) { flushAndDetectCUser(); onBack() }
-                        }) { Icon(Icons.Default.ArrowBack, "Close") }
+
+                        IconButton(
+                            onClick = {
+
+                                if (!closePopupIfPossible()) {
+                                    flushAndDetectCUser()
+                                    onBack()
+                                }
+                            }
+                        ) {
+
+                            Icon(
+                                Icons.Default.ArrowBack,
+                                "Close"
+                            )
+                        }
                     },
+
                     title = {
+
                         OutlinedTextField(
                             value = urlBarText,
-                            onValueChange = { urlBarText = it },
-                            modifier = Modifier.fillMaxWidth(),
+
+                            onValueChange = {
+                                urlBarText = it
+                            },
+
+                            modifier =
+                                Modifier.fillMaxWidth(),
+
                             singleLine = true,
-                            placeholder = { Text("URL or search...") },
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                            keyboardActions = KeyboardActions(onGo = { navigateTo(urlBarText) }),
-                            textStyle = MaterialTheme.typography.bodySmall,
+
+                            placeholder = {
+                                Text(
+                                    "URL or search..."
+                                )
+                            },
+
+                            keyboardOptions =
+                                KeyboardOptions(
+                                    imeAction =
+                                        ImeAction.Go
+                                ),
+
+                            keyboardActions =
+                                KeyboardActions(
+                                    onGo = {
+                                        navigateTo(
+                                            urlBarText
+                                        )
+                                    }
+                                ),
+
+                            textStyle =
+                                MaterialTheme
+                                    .typography
+                                    .bodySmall,
                         )
                     },
+
                     actions = {
-                        IconButton(onClick = { errorMsg = null; activeWebView?.reload() }) {
-                            Icon(Icons.Default.Refresh, "Reload")
+
+                        IconButton(
+                            onClick = {
+                                errorMsg = null
+                                activeWebView?.reload()
+                            }
+                        ) {
+
+                            Icon(
+                                Icons.Default.Refresh,
+                                "Reload"
+                            )
                         }
-                        IconButton(onClick = { showMenu = true }) {
-                            Icon(Icons.Default.MoreVert, "More")
+
+                        IconButton(
+                            onClick = {
+                                showMenu = true
+                            }
+                        ) {
+
+                            Icon(
+                                Icons.Default.MoreVert,
+                                "More"
+                            )
                         }
-                        DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+
+                        DropdownMenu(
+                            expanded = showMenu,
+
+                            onDismissRequest = {
+                                showMenu = false
+                            }
+                        ) {
+
                             DropdownMenuItem(
-                                text = { Text("Back") }, enabled = canBack,
-                                leadingIcon = { Icon(Icons.Default.ArrowBack, null) },
-                                onClick = { activeWebView?.goBack(); showMenu = false }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Forward") }, enabled = canForward,
-                                leadingIcon = { Icon(Icons.Default.ArrowForward, null) },
-                                onClick = { activeWebView?.goForward(); showMenu = false }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Facebook Home") },
-                                leadingIcon = { Icon(Icons.Default.Home, null) },
-                                onClick = { navigateTo(HOME_URL); showMenu = false }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("New session") },
-                                leadingIcon = { Icon(Icons.Default.Add, null) },
-                                onClick = { showMenu = false; onCreateAnother() }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("📋 Copy Cookies (JSON)") },
-                                leadingIcon = { Icon(Icons.Default.ContentCopy, null) },
+                                text = {
+                                    Text("Back")
+                                },
+
+                                enabled = canBack,
+
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Default.ArrowBack,
+                                        null
+                                    )
+                                },
+
                                 onClick = {
+
+                                    activeWebView?.goBack()
+
                                     showMenu = false
+                                }
+                            )
+
+                            DropdownMenuItem(
+                                text = {
+                                    Text("Forward")
+                                },
+
+                                enabled = canForward,
+
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Default.ArrowForward,
+                                        null
+                                    )
+                                },
+
+                                onClick = {
+
+                                    activeWebView?.goForward()
+
+                                    showMenu = false
+                                }
+                            )
+
+                            DropdownMenuItem(
+                                text = {
+                                    Text("Facebook Home")
+                                },
+
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Default.Home,
+                                        null
+                                    )
+                                },
+
+                                onClick = {
+
+                                    navigateTo(
+                                        HOME_URL
+                                    )
+
+                                    showMenu = false
+                                }
+                            )
+
+                            DropdownMenuItem(
+                                text = {
+                                    Text("New session")
+                                },
+
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Default.Add,
+                                        null
+                                    )
+                                },
+
+                                onClick = {
+
+                                    showMenu = false
+
+                                    onCreateAnother()
+                                }
+                            )
+
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        "📋 Copy Cookies (JSON)"
+                                    )
+                                },
+
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Default.ContentCopy,
+                                        null
+                                    )
+                                },
+
+                                onClick = {
+
+                                    showMenu = false
+
                                     flushAndDetectCUser()
+
                                     copySingleSessionCookies(
-                                        context, session, multiProfileSupported, currentUrl, pageTitle
+                                        context,
+                                        session,
+                                        multiProfileSupported,
+                                        currentUrl,
+                                        pageTitle
                                     )
                                 }
                             )
+
                             DropdownMenuItem(
-                                text = { Text("Close") },
-                                onClick = { showMenu = false; flushAndDetectCUser(); onBack() }
+                                text = {
+                                    Text("Close")
+                                },
+
+                                onClick = {
+
+                                    showMenu = false
+
+                                    flushAndDetectCUser()
+
+                                    onBack()
+                                }
                             )
                         }
                     }
                 )
+
                 if (isLoading) {
+
                     LinearProgressIndicator(
-                        progress = { loadingProgress / 100f },
-                        modifier = Modifier.fillMaxWidth(),
+                        progress = {
+                            loadingProgress / 100f
+                        },
+
+                        modifier =
+                            Modifier.fillMaxWidth(),
                     )
                 }
             }
         }
+
     ) { pad ->
-        Box(Modifier.fillMaxSize().padding(pad)) {
+
+        Box(
+            Modifier
+                .fillMaxSize()
+                .padding(pad)
+        ) {
+
             AndroidView(
-                modifier = Modifier.fillMaxSize(),
+
+                modifier =
+                    Modifier.fillMaxSize(),
+
                 factory = { ctx ->
+
                     FrameLayout(ctx).also { root ->
+
                         rootRef = root
-                        val initial = WebView(ctx)
+
+                        val initial =
+                            WebView(ctx)
+
                         configureProfile(initial)
-                        initial.webViewClient = makeClient(initial)
-                        initial.webChromeClient = makeChromeClient(initial)
-                        initial.layoutParams = FrameLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
-                        )
-                        root.addView(initial); activeWebView = initial
+
+                        initial.webViewClient =
+                            makeClient(initial)
+
+                        initial.webChromeClient =
+                            makeChromeClient(initial)
+
+                        initial.layoutParams =
+                            FrameLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT
+                            )
+
+                        root.addView(initial)
+
+                        activeWebView = initial
+
                         initial.loadUrl(HOME_URL)
                     }
                 },
+
                 update = { root ->
+
                     rootRef = root
-                    val child = root.getChildAt(root.childCount - 1) as? WebView
-                    if (child != null && activeWebView == null) activeWebView = child
-                },
-                onRelease = { root ->
-                    for (i in root.childCount - 1 downTo 0) {
-                        (root.getChildAt(i) as? WebView)?.let { web ->
-                            runCatching {
-                                web.stopLoading(); web.loadUrl("about:blank")
-                                web.removeAllViews(); web.destroy()
-                            }
-                        }
+
+                    val child =
+                        root.getChildAt(
+                            root.childCount - 1
+                        ) as? WebView
+
+                    if (
+                        child != null &&
+                        activeWebView == null
+                    ) {
+                        activeWebView = child
                     }
-                    root.removeAllViews(); activeWebView = null; rootRef = null
+                },
+
+                onRelease = { root ->
+
+                    for (
+                        i in root.childCount - 1 downTo 0
+                    ) {
+
+                        (
+                            root.getChildAt(i)
+                                as? WebView
+                            )?.let { web ->
+
+                                runCatching {
+
+                                    web.stopLoading()
+
+                                    web.loadUrl(
+                                        "about:blank"
+                                    )
+
+                                    web.removeAllViews()
+
+                                    web.destroy()
+                                }
+                            }
+                    }
+
+                    root.removeAllViews()
+
+                    activeWebView = null
+                    rootRef = null
                 }
             )
+
             errorMsg?.let { err ->
+
                 Column(
+
                     Modifier
                         .fillMaxSize()
-                        .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.96f))
+                        .background(
+                            MaterialTheme
+                                .colorScheme
+                                .errorContainer
+                                .copy(alpha = 0.96f)
+                        )
                         .padding(24.dp),
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.CenterHorizontally,
+
+                    verticalArrangement =
+                        Arrangement.Center,
+
+                    horizontalAlignment =
+                        Alignment.CenterHorizontally,
                 ) {
-                    Text("Page failed to load", fontWeight = FontWeight.Bold,
-                        style = MaterialTheme.typography.titleMedium)
-                    Spacer(Modifier.height(8.dp))
-                    Text(err, style = MaterialTheme.typography.bodySmall)
-                    Spacer(Modifier.height(8.dp))
-                    Text(currentUrl, style = MaterialTheme.typography.labelSmall)
-                    Spacer(Modifier.height(16.dp))
-                    Button(onClick = { errorMsg = null; activeWebView?.reload() }) { Text("Reload") }
+
+                    Text(
+                        "Page failed to load",
+
+                        fontWeight =
+                            FontWeight.Bold,
+
+                        style =
+                            MaterialTheme
+                                .typography
+                                .titleMedium
+                    )
+
+                    Spacer(
+                        Modifier.height(8.dp)
+                    )
+
+                    Text(
+                        err,
+
+                        style =
+                            MaterialTheme
+                                .typography
+                                .bodySmall
+                    )
+
+                    Spacer(
+                        Modifier.height(8.dp)
+                    )
+
+                    Text(
+                        currentUrl,
+
+                        style =
+                            MaterialTheme
+                                .typography
+                                .labelSmall
+                    )
+
+                    Spacer(
+                        Modifier.height(16.dp)
+                    )
+
+                    Button(
+                        onClick = {
+
+                            errorMsg = null
+
+                            activeWebView?.reload()
+                        }
+                    ) {
+                        Text("Reload")
+                    }
                 }
             }
         }
