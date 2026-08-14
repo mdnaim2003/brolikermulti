@@ -33,8 +33,9 @@ android {
     buildTypes {
         release {
             signingConfig = signingConfigs.getByName("release")
-            isMinifyEnabled = true
-            isShrinkResources = true
+            // Keep release build stable first. R8/resource shrinking can be enabled after the signed release build is confirmed.
+            isMinifyEnabled = false
+            isShrinkResources = false
         }
     }
 
