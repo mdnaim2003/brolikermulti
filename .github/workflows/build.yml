@@ -72,7 +72,7 @@ jobs:
           echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
           echo "Building versionCode=$VERSION_CODE"
 
-      - name: Validate release signing secrets
+      - name: Validate and resolve release signing password
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
@@ -82,16 +82,44 @@ jobs:
           set -euo pipefail
           [ -n "${KEYSTORE_PASSWORD:-}" ] || { echo "KEYSTORE_PASSWORD is missing."; exit 1; }
           [ -n "${KEY_ALIAS:-}" ] || { echo "KEY_ALIAS is missing."; exit 1; }
-          [ -n "${KEY_PASSWORD:-}" ] || { echo "KEY_PASSWORD is missing."; exit 1; }
-          echo "Signing secrets are present."
+
+          echo "Checking release keystore..."
+
+          # The setup script normally uses the same password for the key and the keystore
+          # unless a different key password was explicitly entered at the final keytool prompt.
+          if [ -n "${KEY_PASSWORD:-}" ] && keytool -list -v \
+              -keystore release-key.jks \
+              -storepass "$KEYSTORE_PASSWORD" \
+              -alias "$KEY_ALIAS" \
+              -keypass "$KEY_PASSWORD" >/dev/null 2>&1; then
+            RESOLVED_KEY_PASSWORD="$KEY_PASSWORD"
+            echo "Explicit KEY_PASSWORD successfully validated."
+          elif keytool -list -v \
+              -keystore release-key.jks \
+              -storepass "$KEYSTORE_PASSWORD" \
+              -alias "$KEY_ALIAS" \
+              -keypass "$KEYSTORE_PASSWORD" >/dev/null 2>&1; then
+            RESOLVED_KEY_PASSWORD="$KEYSTORE_PASSWORD"
+            echo "KEY_PASSWORD resolved to KEYSTORE_PASSWORD."
+          else
+            echo "ERROR: The keystore opens with KEYSTORE_PASSWORD, but neither KEY_PASSWORD nor KEYSTORE_PASSWORD can unlock alias '$KEY_ALIAS'."
+            echo "Check KEYSTORE_PASSWORD, KEY_ALIAS, and KEY_PASSWORD in GitHub Repository Secrets."
+            exit 1
+          fi
+
+          echo "KEY_PASSWORD=$RESOLVED_KEY_PASSWORD" >> "$GITHUB_ENV"
+          echo "Signing keystore and key password validated successfully."
 
       - name: Build signed release APK
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           VERSION_CODE: ${{ env.VERSION_CODE }}
-        run: ./gradlew assembleRelease --no-daemon
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${KEY_PASSWORD:-}" ] || { echo "Resolved KEY_PASSWORD is missing."; exit 1; }
+          ./gradlew assembleRelease --no-daemon --stacktrace
 
       - name: Upload release APK
         uses: actions/upload-artifact@v4

@@ -6,7 +6,7 @@ plugins {
 
 val releaseStorePassword = System.getenv("KEYSTORE_PASSWORD") ?: ""
 val releaseKeyAlias = System.getenv("KEY_ALIAS") ?: ""
-val releaseKeyPassword = System.getenv("KEY_PASSWORD") ?: ""
+val releaseKeyPassword = System.getenv("KEY_PASSWORD") ?: releaseStorePassword
 val ciVersionCode = System.getenv("VERSION_CODE")?.toIntOrNull()
 
 android {
@@ -28,6 +28,11 @@ android {
             keyAlias = releaseKeyAlias
             keyPassword = releaseKeyPassword
         }
+    }
+
+    lint {
+        // Work around a known lint detector incompatibility with the current Kotlin/lint stack.
+        disable += "NullSafeMutableLiveData"
     }
 
     buildTypes {
