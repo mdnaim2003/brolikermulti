@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Left person (slightly behind) -->
+    <path
+        android:fillColor="#90CAF9"
+        android:pathData="M35,52 C35,52 28,55 25,62 L45,62 C45,58 42,54 38,52 Z" />
+    <path
+        android:fillColor="#90CAF9"
+        android:pathData="M36.5,43 C36.5,43 30,43 30,49.5 C30,56 36.5,56 36.5,56 C36.5,56 43,56 43,49.5 C43,43 36.5,43 Z" />
+
+    <!-- Right person (slightly behind) -->
+    <path
+        android:fillColor="#90CAF9"
+        android:pathData="M73,52 C73,52 66,55 63,62 L83,62 C83,58 80,54 76,52 Z" />
+    <path
+        android:fillColor="#90CAF9"
+        android:pathData="M74.5,43 C74.5,43 68,43 68,49.5 C68,56 74.5,56 74.5,56 C74.5,56 81,56 81,49.5 C81,43 74.5,43 Z" />
+
+    <!-- Center main person body -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,55 C54,55 44,59 40,68 L68,68 C64,59 54,55 54,55 Z" />
+    <!-- Center main person head -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,44 C54,44 46,44 46,52 C46,60 54,60 54,60 C54,60 62,60 62,52 C62,44 54,44 Z" />
+
+    <!-- Thumbs up icon (bottom right area) -->
+    <!-- Thumb palm -->
+    <path
+        android:fillColor="#FFC107"
+        android:pathData="M68,70 L68,80 C68,81.1 68.9,82 70,82 L78,82 C79.1,82 80,81.1 80,80 L80,72 C80,70.9 79.1,70 78,70 Z" />
+    <!-- Thumb up finger -->
+    <path
+        android:fillColor="#FFC107"
+        android:pathData="M68,72 L64,72 C62.9,72 62,71.1 62,70 L62,64 C62,62 63.5,60 66,60 L68,60 Z" />
+    <!-- Thumb curl -->
+    <path
+        android:fillColor="#FFB300"
+        android:pathData="M80,72 L80,74 L68,74 L68,72 Z" />
+
+    <!-- Multi-session indicator: 3 small dots top-right -->
+    <path
+        android:fillColor="#64B5F6"
+        android:pathData="M80,36 C80,37.7 78.7,39 77,39 C75.3,39 74,37.7 74,36 C74,34.3 75.3,33 77,33 C78.7,33 80,34.3 80,36 Z" />
+    <path
+        android:fillColor="#90CAF9"
+        android:pathData="M87,36 C87,37.7 85.7,39 84,39 C82.3,39 81,37.7 81,36 C81,34.3 82.3,33 84,33 C85.7,33 87,34.3 87,36 Z" />
+    <path
+        android:fillColor="#BBDEFB"
+        android:pathData="M94,36 C94,37.7 92.7,39 91,39 C89.3,39 88,37.7 88,36 C88,34.3 89.3,33 91,33 C92.7,33 94,34.3 94,36 Z" />
+
+</vector>
