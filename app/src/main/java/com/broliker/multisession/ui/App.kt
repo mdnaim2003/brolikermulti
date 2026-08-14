@@ -56,7 +56,17 @@ import java.util.UUID
 private const val HOME_URL = "https://m.facebook.com/"
 private const val PAGE_SIZE = 50
 
-// ─── Data ────────────────────────────────────────────────────────────────────
+// ─── Session colors (auto-assign cycle) ──────────────────────────────────────
+
+private val SESSION_COLORS = listOf(
+    "#E91E63", "#9C27B0", "#3F51B5", "#2196F3", "#009688",
+    "#4CAF50", "#FF9800", "#795548", "#607D8B", "#F44336",
+    "#673AB7", "#03A9F4", "#8BC34A", "#FF5722", "#00BCD4",
+)
+
+private fun colorForIndex(index: Int): String = SESSION_COLORS[index % SESSION_COLORS.size]
+
+// ─── Data ─────────────────────────────────────────────────────────────────────
 
 private data class SessionMeta(
     val id: String,
@@ -66,9 +76,12 @@ private data class SessionMeta(
     val createdAt: Long,
     val lastOpenedAt: Long = 0L,
     val archived: Boolean = false,
+    val color: String = "#2196F3",
+    // Cached c_user from last cookie read (for search)
+    val cachedCUser: String = "",
 )
 
-// ─── Store ───────────────────────────────────────────────────────────────────
+// ─── Store ────────────────────────────────────────────────────────────────────
 
 private class SessionStore(context: Context) {
     private val prefs = context.getSharedPreferences("bro_sessions", Context.MODE_PRIVATE)
@@ -87,6 +100,8 @@ private class SessionStore(context: Context) {
                         createdAt = o.optLong("createdAt"),
                         lastOpenedAt = o.optLong("lastOpenedAt"),
                         archived = o.optBoolean("archived", false),
+                        color = o.optString("color", "#2196F3"),
+                        cachedCUser = o.optString("cachedCUser", ""),
                     )
                 )
             }
@@ -104,6 +119,8 @@ private class SessionStore(context: Context) {
                 put("createdAt", s.createdAt)
                 put("lastOpenedAt", s.lastOpenedAt)
                 put("archived", s.archived)
+                put("color", s.color)
+                put("cachedCUser", s.cachedCUser)
             })
         }
         prefs.edit().putString("items", arr.toString()).apply()
@@ -118,40 +135,111 @@ private class SessionStore(context: Context) {
         while (used.contains(n)) n++
         return n
     }
+
+    fun nextColorIndex(current: List<SessionMeta>): Int = current.size
 }
 
 // ─── Cookie helpers ───────────────────────────────────────────────────────────
 
+private val FB_DOMAINS = listOf(
+    "https://m.facebook.com",
+    "https://www.facebook.com",
+    "https://facebook.com",
+    "https://static.xx.fbcdn.net",
+)
+
+/** Parse raw cookie header string → flat key→value map */
+private fun parseCookieHeader(raw: String): Map<String, String> {
+    val map = mutableMapOf<String, String>()
+    raw.split(";").forEach { part ->
+        val trimmed = part.trim()
+        val eq = trimmed.indexOf('=')
+        if (eq > 0) {
+            val k = trimmed.substring(0, eq).trim()
+            val v = trimmed.substring(eq + 1).trim()
+            if (k.isNotEmpty()) map[k] = v
+        } else if (trimmed.isNotEmpty()) {
+            map[trimmed] = ""
+        }
+    }
+    return map
+}
+
+/** Collect all cookies for a session from profile-scoped or global manager */
+private fun collectCookiesForSession(
+    session: SessionMeta,
+    multiProfileSupported: Boolean,
+    extraUrl: String = "",
+): Map<String, String> {
+    val profileMgr = if (multiProfileSupported) {
+        runCatching {
+            ProfileStore.getInstance().getProfile(session.profileName)?.cookieManager
+        }.getOrNull()
+    } else null
+
+    val globalMgr = CookieManager.getInstance()
+    val result = mutableMapOf<String, String>()
+
+    val domains = if (extraUrl.isNotBlank() && !FB_DOMAINS.any { extraUrl.startsWith(it) })
+        FB_DOMAINS + extraUrl else FB_DOMAINS
+
+    domains.forEach { domain ->
+        val raw = profileMgr?.getCookie(domain) ?: globalMgr.getCookie(domain)
+        if (!raw.isNullOrBlank()) {
+            parseCookieHeader(raw).forEach { (k, v) ->
+                if (!result.containsKey(k)) result[k] = v
+            }
+        }
+    }
+    return result
+}
+
+/** Build exact output JSON object for one session */
+private fun buildSessionCookieJson(
+    session: SessionMeta,
+    cookies: Map<String, String>,
+): JSONObject {
+    // Build cookies sub-object — keep all keys, empty string if unavailable
+    val cookiesObj = JSONObject()
+    // Priority keys first (always present, even if empty)
+    val priorityKeys = listOf(
+        "datr", "fr", "sb", "ps_l", "ps_n",
+        "c_user", "xs", "presence", "wd", "dbln",
+        "NID", "__Secure-STRP", "SEARCH_SAMESITE", "AEC", "OTZ"
+    )
+    priorityKeys.forEach { key ->
+        cookiesObj.put(key, cookies[key] ?: "")
+    }
+    // Any extra keys not in priority list
+    cookies.forEach { (k, v) ->
+        if (!priorityKeys.contains(k)) cookiesObj.put(k, v)
+    }
+
+    return JSONObject().apply {
+        put("sessionId", session.id)
+        put("color", session.color)
+        put("cookies", cookiesObj)
+    }
+}
+
+// ─── Export / Import ──────────────────────────────────────────────────────────
+
 private fun exportCookiesForProfile(
-    profileName: String,
+    session: SessionMeta,
     multiProfileSupported: Boolean,
 ): String {
-    return try {
-        val mgr = if (multiProfileSupported) {
+    val cookies = collectCookiesForSession(session, multiProfileSupported)
+    val cookieMap = JSONObject()
+    FB_DOMAINS.forEach { domain ->
+        val profileMgr = if (multiProfileSupported) {
             runCatching {
-                ProfileStore.getInstance().getProfile(profileName)?.cookieManager
+                ProfileStore.getInstance().getProfile(session.profileName)?.cookieManager
             }.getOrNull()
         } else null
-
-        val domains = listOf(
-            "https://m.facebook.com",
-            "https://www.facebook.com",
-            "https://facebook.com",
-            "https://static.xx.fbcdn.net",
-        )
-        val cookieMap = JSONObject()
-        domains.forEach { domain ->
-            val raw = if (mgr != null) {
-                mgr.getCookie(domain)
-            } else {
-                CookieManager.getInstance().getCookie(domain)
-            }
-            if (!raw.isNullOrBlank()) cookieMap.put(domain, raw)
-        }
-        cookieMap.toString()
-    } catch (e: Exception) {
-        "{}"
+        val raw = profileMgr?.getCookie(domain) ?: CookieManager.getInstance().getCookie(domain)
+        if (!raw.isNullOrBlank()) cookieMap.put(domain, raw)
     }
+    return cookieMap.toString()
 }
 
 private fun importCookiesForProfile(
@@ -167,16 +255,12 @@ private fun importCookiesForProfile(
             val cookieHeader = obj.getString(domain)
             cookieHeader.split(";").forEach { part ->
                 val trimmed = part.trim()
-                if (trimmed.isNotEmpty()) {
-                    mgr.setCookie(domain, trimmed)
-                }
+                if (trimmed.isNotEmpty()) mgr.setCookie(domain, trimmed)
             }
         }
         mgr.flush()
     } catch (_: Exception) {}
 }
-
-// ─── Export / Import ──────────────────────────────────────────────────────────
 
 private fun buildExportJson(
     sessions: List<SessionMeta>,
@@ -184,7 +268,7 @@ private fun buildExportJson(
 ): String {
     val arr = JSONArray()
     sessions.filter { !it.archived }.forEach { s ->
-        val cookies = exportCookiesForProfile(s.profileName, multiProfileSupported)
+        val cookieRaw = exportCookiesForProfile(s, multiProfileSupported)
         arr.put(JSONObject().apply {
             put("id", s.id)
             put("profileName", s.profileName)
@@ -193,12 +277,14 @@ private fun buildExportJson(
             put("createdAt", s.createdAt)
             put("lastOpenedAt", s.lastOpenedAt)
             put("archived", s.archived)
-            put("cookies", cookies)
+            put("color", s.color)
+            put("cachedCUser", s.cachedCUser)
+            put("cookies", cookieRaw)
         })
     }
     return JSONObject().apply {
         put("app", "BroLiker")
-        put("version", 2)
+        put("version", 3)
         put("exportedAt", System.currentTimeMillis())
         put("sessions", arr)
     }.toString(2)
@@ -221,6 +307,8 @@ private fun parseImportJson(
             createdAt = o.optLong("createdAt", System.currentTimeMillis()),
             lastOpenedAt = o.optLong("lastOpenedAt", 0L),
             archived = o.optBoolean("archived", false),
+            color = o.optString("color", colorForIndex(i)),
+            cachedCUser = o.optString("cachedCUser", ""),
         )
         result.add(meta)
         val cookiesStr = o.optString("cookies", "{}")
@@ -231,128 +319,84 @@ private fun parseImportJson(
     return result
 }
 
-// ─── Cookie Copy Function (EXACT FORMAT - Flat JSON) ──────────────────────
+// ─── Cookie copy helpers ──────────────────────────────────────────────────────
 
-private fun copySessionCookiesAsJson(
+/** Copy cookies for multiple sessions in exact format */
+private fun copyMultiSessionCookies(
+    context: Context,
+    sessions: List<SessionMeta>,
+    multiProfileSupported: Boolean,
+) {
+    try {
+        val root = JSONObject()
+        var totalSessions = 0
+        var totalCookies = 0
+
+        sessions.forEach { session ->
+            val cookies = collectCookiesForSession(session, multiProfileSupported)
+            val sessionObj = buildSessionCookieJson(session, cookies)
+            root.put(session.name, sessionObj)
+            totalSessions++
+            totalCookies += cookies.size
+        }
+
+        val jsonString = root.toString(2)
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("BroLiker Multi Cookies", jsonString))
+
+        val hasCUser = sessions.any { s ->
+            collectCookiesForSession(s, multiProfileSupported).containsKey("c_user")
+        }
+
+        Toast.makeText(
+            context,
+            if (hasCUser) "✅ $totalSessions sessions, $totalCookies cookies copied!"
+            else "⚠️ Copied but login cookies (c_user) not found. Login first.",
+            Toast.LENGTH_LONG,
+        ).show()
+
+    } catch (e: Exception) {
+        Toast.makeText(context, "❌ Error: ${e.message}", Toast.LENGTH_LONG).show()
+    }
+}
+
+/** Single session cookie copy (from browser screen) */
+private fun copySingleSessionCookies(
     context: Context,
     session: SessionMeta,
+    multiProfileSupported: Boolean,
     currentUrl: String,
     pageTitle: String,
 ) {
     try {
-        val multiProfileSupported = WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)
+        val cookies = collectCookiesForSession(session, multiProfileSupported, currentUrl)
+        val root = JSONObject()
+        root.put(session.name, buildSessionCookieJson(session, cookies))
 
-        // Get profile-scoped cookie manager
-        val profileCookieMgr = if (multiProfileSupported) {
-            runCatching {
-                ProfileStore.getInstance().getProfile(session.profileName)?.cookieManager
-            }.getOrNull()
-        } else null
-
-        val globalMgr = CookieManager.getInstance()
-
-        // All relevant Facebook domains
-        val domains = listOf(
-            "https://m.facebook.com",
-            "https://www.facebook.com",
-            "https://facebook.com",
-            "https://static.xx.fbcdn.net",
-        )
-
-        // Collect all cookies in a flat map
-        val cookiesMap = mutableMapOf<String, String>()
-
-        domains.forEach { domain ->
-            val raw = profileCookieMgr?.getCookie(domain) ?: globalMgr.getCookie(domain)
-            if (!raw.isNullOrBlank()) {
-                raw.split(";").forEach { part ->
-                    val trimmed = part.trim()
-                    val eqIndex = trimmed.indexOf('=')
-                    if (eqIndex > 0) {
-                        val key = trimmed.substring(0, eqIndex).trim()
-                        val value = trimmed.substring(eqIndex + 1).trim()
-                        if (key.isNotEmpty() && !cookiesMap.containsKey(key)) {
-                            cookiesMap[key] = value
-                        }
-                    } else if (trimmed.isNotEmpty() && eqIndex < 0) {
-                        // value-less cookie flag
-                        cookiesMap[trimmed] = ""
-                    }
-                }
-            }
-        }
-
-        // Also try current URL
-        if (currentUrl.isNotBlank() && !domains.any { currentUrl.startsWith(it) }) {
-            val raw = profileCookieMgr?.getCookie(currentUrl) ?: globalMgr.getCookie(currentUrl)
-            if (!raw.isNullOrBlank()) {
-                raw.split(";").forEach { part ->
-                    val trimmed = part.trim()
-                    val eqIndex = trimmed.indexOf('=')
-                    if (eqIndex > 0) {
-                        val key = trimmed.substring(0, eqIndex).trim()
-                        val value = trimmed.substring(eqIndex + 1).trim()
-                        if (key.isNotEmpty() && !cookiesMap.containsKey(key)) {
-                            cookiesMap[key] = value
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── Build EXACT flat JSON format ──
-        val output = JSONObject()
-
-        // Add session info
-        output.put("session_name", session.name)
-        output.put("profile_name", session.profileName)
-        output.put("group", session.group)
-        output.put("current_url", currentUrl)
-        output.put("page_title", pageTitle)
-        output.put("exported_at", System.currentTimeMillis())
-
-        // Add all cookies as flat key-value pairs (EXACT format you showed)
-        cookiesMap.forEach { (key, value) ->
-            output.put(key, value)
-        }
-
-        val jsonString = output.toString(2)
-
-        // Copy to clipboard
+        val jsonString = root.toString(2)
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText("BroLiker Cookies", jsonString))
 
-        // Show result
-        if (cookiesMap.isNotEmpty()) {
-            val importantKeys = listOf("c_user", "xs", "datr", "fr", "sb")
-            val foundImportant = importantKeys.filter { cookiesMap.containsKey(it) }
-            
-            val message = if (foundImportant.isNotEmpty()) {
-                "✅ ${cookiesMap.size} cookies copied! Login keys: ${foundImportant.joinToString(", ")}"
-            } else {
-                "⚠️ ${cookiesMap.size} cookies copied but login keys not found"
-            }
-            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
-        } else {
-            val debugInfo = buildString {
-                append("Profile supported: $multiProfileSupported\n")
-                append("Profile name: ${session.profileName}\n")
-                append("Profile manager: ${if (profileCookieMgr != null) "Found" else "NULL"}\n")
-                append("Global test: ${globalMgr.getCookie("https://m.facebook.com")?.take(30) ?: "null"}")
-            }
-            Toast.makeText(
-                context,
-                "❌ No cookies found.\n$debugInfo",
-                Toast.LENGTH_LONG,
-            ).show()
-        }
-
-    } catch (e: Exception) {
+        val cUser = cookies["c_user"]
         Toast.makeText(
             context,
-            "❌ Error: ${e.message}",
+            if (cUser != null) "✅ ${cookies.size} cookies copied! c_user: $cUser"
+            else "⚠️ ${cookies.size} cookies copied. Login keys not found.",
             Toast.LENGTH_LONG,
         ).show()
+
+    } catch (e: Exception) {
+        Toast.makeText(context, "❌ Error: ${e.message}", Toast.LENGTH_LONG).show()
+    }
+}
+
+// ─── Hex color → Compose Color ────────────────────────────────────────────────
+
+private fun hexToColor(hex: String): Color {
+    return try {
+        Color(android.graphics.Color.parseColor(hex))
+    } catch (_: Exception) {
+        Color(0xFF2196F3)
     }
 }
 
@@ -386,9 +430,7 @@ fun BroLikerApp() {
         uri ?: return@rememberLauncherForActivityResult
         try {
             val json = buildExportJson(sessions, multiProfileSupported)
-            context.contentResolver.openOutputStream(uri)?.use { out ->
-                out.write(json.toByteArray())
-            }
+            context.contentResolver.openOutputStream(uri)?.use { it.write(json.toByteArray()) }
             Toast.makeText(context, "✅ Export সফল হয়েছে", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             Toast.makeText(context, "❌ Export ব্যর্থ: ${e.message}", Toast.LENGTH_LONG).show()
@@ -400,8 +442,8 @@ fun BroLikerApp() {
     ) { uri: Uri? ->
         uri ?: return@rememberLauncherForActivityResult
         try {
-            val json = context.contentResolver.openInputStream(uri)?.use { inp ->
-                inp.bufferedReader().readText()
+            val json = context.contentResolver.openInputStream(uri)?.use {
+                it.bufferedReader().readText()
             } ?: return@rememberLauncherForActivityResult
             val imported = parseImportJson(json, multiProfileSupported)
             val existingIds = sessions.map { it.id }.toSet()
@@ -409,11 +451,7 @@ fun BroLikerApp() {
             val merged = sessions + newOnes
             sessions = merged
             store.save(merged)
-            Toast.makeText(
-                context,
-                "✅ ${newOnes.size} session import হয়েছে",
-                Toast.LENGTH_SHORT
-            ).show()
+            Toast.makeText(context, "✅ ${newOnes.size} session import হয়েছে", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             Toast.makeText(context, "❌ Import ব্যর্থ: ${e.message}", Toast.LENGTH_LONG).show()
         }
@@ -422,15 +460,25 @@ fun BroLikerApp() {
     if (selected != null) {
         BrowserScreen(
             session = selected!!,
+            multiProfileSupported = multiProfileSupported,
             onBack = { selected = null },
             onCreateAnother = { showCreate = true },
+            onCUserDetected = { cUser ->
+                // Update cachedCUser when detected from browser
+                sessions = sessions.map {
+                    if (it.id == selected!!.id) it.copy(cachedCUser = cUser) else it
+                }
+                store.save(sessions)
+            }
         )
         if (showCreate) {
+            val idx = store.nextColorIndex(sessions)
             CreateSessionDialog(
                 groups = sessions.map { it.group }.filter { it.isNotBlank() }.distinct().sorted(),
                 nextSerial = store.nextSerialNumber(sessions),
+                defaultColor = colorForIndex(idx),
                 onDismiss = { showCreate = false },
-            ) { name, group ->
+            ) { name, group, color ->
                 val profileName = "profile_${UUID.randomUUID()}"
                 val meta = SessionMeta(
                     id = UUID.randomUUID().toString(),
@@ -438,6 +486,7 @@ fun BroLikerApp() {
                     name = name,
                     group = group,
                     createdAt = System.currentTimeMillis(),
+                    color = color,
                 )
                 sessions = sessions + meta
                 store.save(sessions)
@@ -451,13 +500,18 @@ fun BroLikerApp() {
     val groups = listOf("All", "Ungrouped") +
         sessions.map { it.group }.filter { it.isNotBlank() }.distinct().sorted()
 
+    // Search: name OR c_user match
     val filtered = sessions.filter { !it.archived }.filter { session ->
         val groupOk = when (filter) {
             "All" -> true
             "Ungrouped" -> session.group.isBlank()
             else -> session.group == filter
         }
-        groupOk && (query.isBlank() || session.name.contains(query, ignoreCase = true))
+        val q = query.trim()
+        val matchOk = q.isBlank() ||
+            session.name.contains(q, ignoreCase = true) ||
+            (q.length >= 6 && session.cachedCUser.contains(q, ignoreCase = true))
+        groupOk && matchOk
     }
 
     val totalPages = ((filtered.size - 1) / PAGE_SIZE + 1).coerceAtLeast(1)
@@ -483,25 +537,31 @@ fun BroLikerApp() {
                 },
                 actions = {
                     IconButton(onClick = { showSettings = true }) {
-                        Icon(Icons.Default.Settings, contentDescription = "Settings")
+                        Icon(Icons.Default.Settings, "Settings")
                     }
                     IconButton(onClick = { showGroupManager = true }) {
-                        Icon(Icons.Default.AccountTree, contentDescription = "Groups")
+                        Icon(Icons.Default.AccountTree, "Groups")
                     }
                     var showMore by remember { mutableStateOf(false) }
                     IconButton(onClick = { showMore = true }) {
-                        Icon(Icons.Default.MoreVert, contentDescription = "More")
+                        Icon(Icons.Default.MoreVert, "More")
                     }
                     DropdownMenu(expanded = showMore, onDismissRequest = { showMore = false }) {
                         DropdownMenuItem(
                             text = { Text(if (allPageSelected) "Deselect page" else "Select page") },
                             leadingIcon = { Icon(Icons.Default.SelectAll, null) },
                             onClick = {
-                                selectedIds = if (allPageSelected) {
+                                selectedIds = if (allPageSelected)
                                     selectedIds - pageItems.map { it.id }.toSet()
-                                } else {
-                                    selectedIds + pageItems.map { it.id }.toSet()
-                                }
+                                else selectedIds + pageItems.map { it.id }.toSet()
+                                showMore = false
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Select all in group") },
+                            leadingIcon = { Icon(Icons.Default.DoneAll, null) },
+                            onClick = {
+                                selectedIds = selectedIds + filtered.map { it.id }.toSet()
                                 showMore = false
                             }
                         )
@@ -532,7 +592,7 @@ fun BroLikerApp() {
         },
         floatingActionButton = {
             FloatingActionButton(onClick = { showCreate = true }) {
-                Icon(Icons.Default.Add, contentDescription = "New session")
+                Icon(Icons.Default.Add, "New session")
             }
         }
     ) { pad ->
@@ -543,21 +603,19 @@ fun BroLikerApp() {
                 .padding(pad)
                 .padding(horizontal = 16.dp)
         ) {
-
             Spacer(Modifier.height(8.dp))
 
+            // ── Search bar ────────────────────────────────────────────
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                label = { Text("Search sessions...") },
+                label = { Text("Search by name or c_user...") },
                 leadingIcon = { Icon(Icons.Default.Search, null) },
                 trailingIcon = {
                     if (query.isNotEmpty()) {
-                        IconButton(onClick = { query = "" }) {
-                            Icon(Icons.Default.Close, null)
-                        }
+                        IconButton(onClick = { query = "" }) { Icon(Icons.Default.Close, null) }
                     }
                 },
                 shape = RoundedCornerShape(12.dp),
@@ -565,6 +623,7 @@ fun BroLikerApp() {
 
             Spacer(Modifier.height(10.dp))
 
+            // ── Group filter chips ────────────────────────────────────
             LazyRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 contentPadding = PaddingValues(vertical = 4.dp),
@@ -578,9 +637,7 @@ fun BroLikerApp() {
                     FilterChip(
                         selected = filter == group,
                         onClick = { filter = group },
-                        label = {
-                            Text("$group ($count)")
-                        },
+                        label = { Text("$group ($count)") },
                         leadingIcon = if (filter == group) {
                             { Icon(Icons.Default.Check, null, Modifier.size(16.dp)) }
                         } else null,
@@ -590,6 +647,7 @@ fun BroLikerApp() {
 
             Spacer(Modifier.height(8.dp))
 
+            // ── Selection action bar ──────────────────────────────────
             if (selectedIds.isNotEmpty()) {
                 Card(
                     colors = CardDefaults.cardColors(
@@ -600,35 +658,48 @@ fun BroLikerApp() {
                     Row(
                         Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
                             "${selectedIds.size} selected",
                             modifier = Modifier.weight(1f),
                             fontWeight = FontWeight.SemiBold,
+                            fontSize = 13.sp,
                             color = MaterialTheme.colorScheme.onPrimaryContainer,
                         )
+                        // ── Copy cookies for selected ─────────────────
+                        TextButton(onClick = {
+                            val toCopy = sessions.filter { it.id in selectedIds }
+                            copyMultiSessionCookies(context, toCopy, multiProfileSupported)
+                        }) {
+                            Icon(
+                                Icons.Default.ContentCopy,
+                                null,
+                                Modifier.size(16.dp),
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text("Copy Cookies", fontSize = 12.sp)
+                        }
                         TextButton(onClick = { showBulkGroup = true }) {
-                            Text("Move to Group")
+                            Text("Group", fontSize = 12.sp)
                         }
-                        TextButton(
-                            onClick = {
-                                sessions = sessions.filterNot { it.id in selectedIds }
-                                store.save(sessions)
-                                selectedIds = emptySet()
-                            }
-                        ) {
-                            Text("Delete", color = MaterialTheme.colorScheme.error)
+                        TextButton(onClick = {
+                            sessions = sessions.filterNot { it.id in selectedIds }
+                            store.save(sessions)
+                            selectedIds = emptySet()
+                        }) {
+                            Text("Del", color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
                         }
-                        IconButton(onClick = { selectedIds = emptySet() }) {
-                            Icon(Icons.Default.Close, null)
+                        IconButton(onClick = { selectedIds = emptySet() }, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.Default.Close, null, Modifier.size(18.dp))
                         }
                     }
                 }
                 Spacer(Modifier.height(6.dp))
             }
 
+            // ── Session list ──────────────────────────────────────────
             if (filtered.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -687,10 +758,12 @@ fun BroLikerApp() {
                                         ProfileStore.getInstance().deleteProfile(session.profileName)
                                     }
                                 }
-                            }
+                            },
+                            onCopyCookies = {
+                                copyMultiSessionCookies(context, listOf(session), multiProfileSupported)
+                            },
                         )
                     }
-
                     if (totalPages > 1) {
                         item {
                             Spacer(Modifier.height(4.dp))
@@ -708,12 +781,16 @@ fun BroLikerApp() {
         }
     }
 
+    // ── Dialogs ────────────────────────────────────────────────────────────
+
     if (showCreate) {
+        val idx = store.nextColorIndex(sessions)
         CreateSessionDialog(
             groups = sessions.map { it.group }.filter { it.isNotBlank() }.distinct().sorted(),
             nextSerial = store.nextSerialNumber(sessions),
+            defaultColor = colorForIndex(idx),
             onDismiss = { showCreate = false },
-        ) { name, group ->
+        ) { name, group, color ->
             val profileName = "profile_${UUID.randomUUID()}"
             val meta = SessionMeta(
                 id = UUID.randomUUID().toString(),
@@ -721,6 +798,7 @@ fun BroLikerApp() {
                 name = name,
                 group = group,
                 createdAt = System.currentTimeMillis(),
+                color = color,
             )
             sessions = sessions + meta
             store.save(sessions)
@@ -784,7 +862,7 @@ fun BroLikerApp() {
     }
 }
 
-// ─── Pagination bar ──────────────────────────────────────────────────────────
+// ─── Pagination ───────────────────────────────────────────────────────────────
 
 @Composable
 private fun PaginationBar(
@@ -794,10 +872,7 @@ private fun PaginationBar(
     onNext: () -> Unit,
     onPage: (Int) -> Unit,
 ) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-    ) {
+    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
         Row(
             Modifier
                 .fillMaxWidth()
@@ -806,26 +881,20 @@ private fun PaginationBar(
             horizontalArrangement = Arrangement.Center,
         ) {
             IconButton(onClick = onPrev, enabled = current > 0) {
-                Icon(Icons.Default.ChevronLeft, "Previous page")
+                Icon(Icons.Default.ChevronLeft, "Prev")
             }
-
             val range = ((current - 2).coerceAtLeast(0)..(current + 2).coerceAtMost(total - 1))
             if (range.first > 0) {
                 PageChip(0, current, onPage)
-                if (range.first > 1) {
-                    Text("…", Modifier.padding(horizontal = 4.dp))
-                }
+                if (range.first > 1) Text("…", Modifier.padding(horizontal = 4.dp))
             }
             range.forEach { p -> PageChip(p, current, onPage) }
             if (range.last < total - 1) {
-                if (range.last < total - 2) {
-                    Text("…", Modifier.padding(horizontal = 4.dp))
-                }
+                if (range.last < total - 2) Text("…", Modifier.padding(horizontal = 4.dp))
                 PageChip(total - 1, current, onPage)
             }
-
             IconButton(onClick = onNext, enabled = current < total - 1) {
-                Icon(Icons.Default.ChevronRight, "Next page")
+                Icon(Icons.Default.ChevronRight, "Next")
             }
         }
     }
@@ -833,23 +902,19 @@ private fun PaginationBar(
 
 @Composable
 private fun PageChip(page: Int, current: Int, onPage: (Int) -> Unit) {
-    val selected = page == current
+    val sel = page == current
     Box(
         modifier = Modifier
             .size(36.dp)
             .clip(CircleShape)
-            .background(
-                if (selected) MaterialTheme.colorScheme.primary
-                else Color.Transparent
-            )
+            .background(if (sel) MaterialTheme.colorScheme.primary else Color.Transparent)
             .clickable { onPage(page) },
         contentAlignment = Alignment.Center,
     ) {
         Text(
             "${page + 1}",
-            color = if (selected) MaterialTheme.colorScheme.onPrimary
-            else MaterialTheme.colorScheme.onSurface,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+            color = if (sel) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
+            fontWeight = if (sel) FontWeight.Bold else FontWeight.Normal,
             fontSize = 13.sp,
         )
     }
@@ -865,11 +930,9 @@ private fun SessionCard(
     onOpen: () -> Unit,
     onRename: () -> Unit,
     onDelete: () -> Unit,
+    onCopyCookies: () -> Unit,
 ) {
-    val groupColor = if (session.group.isNotBlank())
-        MaterialTheme.colorScheme.tertiary
-    else
-        MaterialTheme.colorScheme.outline
+    val sessionColor = hexToColor(session.color)
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -889,18 +952,16 @@ private fun SessionCard(
         ) {
             Checkbox(checked = selected, onCheckedChange = { onSelect() })
 
+            // Color avatar
             Box(
                 Modifier
                     .size(42.dp)
-                    .background(
-                        MaterialTheme.colorScheme.primaryContainer,
-                        RoundedCornerShape(10.dp),
-                    ),
+                    .background(sessionColor, RoundedCornerShape(10.dp)),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
                     session.name.take(1).uppercase(),
-                    color = MaterialTheme.colorScheme.primary,
+                    color = Color.White,
                     fontWeight = FontWeight.Bold,
                     fontSize = 18.sp,
                 )
@@ -920,7 +981,11 @@ private fun SessionCard(
                     Box(
                         Modifier
                             .size(8.dp)
-                            .background(groupColor, CircleShape)
+                            .background(
+                                if (session.group.isNotBlank()) MaterialTheme.colorScheme.tertiary
+                                else MaterialTheme.colorScheme.outline,
+                                CircleShape,
+                            )
                     )
                     Spacer(Modifier.width(4.dp))
                     Text(
@@ -930,6 +995,15 @@ private fun SessionCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    // Show c_user hint if cached
+                    if (session.cachedCUser.isNotEmpty()) {
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "·${session.cachedCUser.takeLast(6)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                        )
+                    }
                 }
             }
 
@@ -950,6 +1024,11 @@ private fun SessionCard(
                 }
                 DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
                     DropdownMenuItem(
+                        text = { Text("Copy Cookies") },
+                        leadingIcon = { Icon(Icons.Default.ContentCopy, null) },
+                        onClick = { showMenu = false; onCopyCookies() }
+                    )
+                    DropdownMenuItem(
                         text = { Text("Rename") },
                         leadingIcon = { Icon(Icons.Default.Edit, null) },
                         onClick = { showMenu = false; onRename() }
@@ -967,14 +1046,15 @@ private fun SessionCard(
     }
 }
 
-// ─── Create session dialog ────────────────────────────────────────────────────
+// ─── Create Session Dialog ────────────────────────────────────────────────────
 
 @Composable
 private fun CreateSessionDialog(
     groups: List<String>,
     nextSerial: Int,
+    defaultColor: String,
     onDismiss: () -> Unit,
-    onCreate: (String, String) -> Unit,
+    onCreate: (String, String, String) -> Unit,
 ) {
     var name by remember { mutableStateOf("My Session $nextSerial") }
     var group by remember { mutableStateOf("") }
@@ -1015,10 +1095,24 @@ private fun CreateSessionDialog(
                                         .clickable { group = g; showGroupSuggestions = false }
                                         .padding(12.dp),
                                 )
-                                Divider()
+                                HorizontalDivider()
                             }
                         }
                     }
+                }
+                // Color preview
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        Modifier
+                            .size(24.dp)
+                            .background(hexToColor(defaultColor), CircleShape)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "Auto color assigned",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 Text(
                     "Each session has its own isolated browser profile.",
@@ -1030,16 +1124,14 @@ private fun CreateSessionDialog(
         confirmButton = {
             Button(
                 enabled = name.isNotBlank(),
-                onClick = { onCreate(name.trim(), group.trim()) }
+                onClick = { onCreate(name.trim(), group.trim(), defaultColor) }
             ) { Text("Create & Open") }
         },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
 
-// ─── Rename dialog ────────────────────────────────────────────────────────────
+// ─── Rename Dialog ────────────────────────────────────────────────────────────
 
 @Composable
 private fun RenameDialog(current: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
@@ -1056,15 +1148,13 @@ private fun RenameDialog(current: String, onDismiss: () -> Unit, onSave: (String
             )
         },
         confirmButton = {
-            Button(enabled = value.isNotBlank(), onClick = { onSave(value.trim()) }) {
-                Text("Save")
-            }
+            Button(enabled = value.isNotBlank(), onClick = { onSave(value.trim()) }) { Text("Save") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
 
-// ─── Group Manager Dialog ────────────────────────────────────────────────────
+// ─── Group Manager Dialog ─────────────────────────────────────────────────────
 
 @Composable
 private fun GroupManagerDialog(
@@ -1107,7 +1197,7 @@ private fun GroupManagerDialog(
                     canEdit = false,
                 )
                 if (groups.isNotEmpty()) {
-                    Divider(modifier = Modifier.padding(vertical = 4.dp))
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
                     Text(
                         "Your Groups",
                         style = MaterialTheme.typography.labelMedium,
@@ -1124,15 +1214,11 @@ private fun GroupManagerDialog(
                             trailingIcon = {
                                 Row {
                                     IconButton(onClick = {
-                                        if (renameValue.isNotBlank()) {
-                                            onRenameGroup(group, renameValue.trim())
-                                        }
+                                        if (renameValue.isNotBlank()) onRenameGroup(group, renameValue.trim())
                                         renamingGroup = null
-                                    }) {
-                                        Icon(Icons.Default.Check, "Save rename")
-                                    }
+                                    }) { Icon(Icons.Default.Check, null) }
                                     IconButton(onClick = { renamingGroup = null }) {
-                                        Icon(Icons.Default.Close, "Cancel rename")
+                                        Icon(Icons.Default.Close, null)
                                     }
                                 }
                             }
@@ -1153,16 +1239,14 @@ private fun GroupManagerDialog(
                 if (groups.isEmpty()) {
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "No groups yet. Set a group when creating or use 'Bulk move to group'.",
+                        "No groups yet.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
         },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Close") }
-        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
     )
 }
 
@@ -1182,42 +1266,33 @@ private fun GroupRow(
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
             .background(
-                if (isSelected) MaterialTheme.colorScheme.primaryContainer
-                else Color.Transparent
+                if (isSelected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent
             )
             .clickable { onClick() }
             .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
-            icon, null,
-            modifier = Modifier.size(20.dp),
+            icon, null, Modifier.size(20.dp),
             tint = if (isSelected) MaterialTheme.colorScheme.primary
             else MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.width(10.dp))
         Text(
-            name,
-            modifier = Modifier.weight(1f),
+            name, modifier = Modifier.weight(1f),
             fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
             color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
             else MaterialTheme.colorScheme.onSurface,
         )
-        Text(
-            "$count",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        Text("$count", style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (canEdit) {
             IconButton(onClick = { onEdit?.invoke() }, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Default.Edit, "Rename group", Modifier.size(16.dp))
+                Icon(Icons.Default.Edit, null, Modifier.size(16.dp))
             }
             IconButton(onClick = { onDelete?.invoke() }, modifier = Modifier.size(32.dp)) {
-                Icon(
-                    Icons.Default.Delete, "Delete group",
-                    Modifier.size(16.dp),
-                    tint = MaterialTheme.colorScheme.error,
-                )
+                Icon(Icons.Default.Delete, null, Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.error)
             }
         }
     }
@@ -1238,7 +1313,7 @@ private fun BulkGroupDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
-                    value = group, onValueChange = { group = it },
+                    group, { group = it },
                     label = { Text("Group name") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
@@ -1251,23 +1326,16 @@ private fun BulkGroupDialog(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(6.dp))
+                                .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(6.dp))
                                 .clickable { group = existing }
-                                .padding(8.dp)
-                                .border(
-                                    1.dp,
-                                    MaterialTheme.colorScheme.outline,
-                                    RoundedCornerShape(6.dp),
-                                )
-                                .padding(8.dp),
+                                .padding(10.dp),
                         )
                     }
                 }
             }
         },
         confirmButton = {
-            Button(enabled = group.isNotBlank(), onClick = { onApply(group.trim()) }) {
-                Text("Move")
-            }
+            Button(enabled = group.isNotBlank(), onClick = { onApply(group.trim()) }) { Text("Move") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
@@ -1293,67 +1361,36 @@ private fun SettingsDialog(
         },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer
-                    )
-                ) {
-                    Row(
-                        Modifier.padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+                    Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Default.Info, null, tint = MaterialTheme.colorScheme.primary)
                         Spacer(Modifier.width(8.dp))
-                        Text(
-                            "$sessionCount sessions saved",
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        )
+                        Text("$sessionCount sessions saved", fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer)
                     }
                 }
-
-                Divider()
-
+                HorizontalDivider()
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Backup & Restore", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                     Text(
-                        "Backup & Restore",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Text(
-                        "Export saves all sessions with cookies (best effort). Import merges sessions without overwriting existing ones.",
+                        "Export saves all sessions with cookies. Import merges without overwriting.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-
                 Button(onClick = onExport, modifier = Modifier.fillMaxWidth()) {
-                    Icon(Icons.Default.Upload, null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Export Backup (.json)")
+                    Icon(Icons.Default.Upload, null); Spacer(Modifier.width(8.dp)); Text("Export Backup (.json)")
                 }
-
                 OutlinedButton(onClick = onImport, modifier = Modifier.fillMaxWidth()) {
-                    Icon(Icons.Default.Download, null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Import Backup (.json)")
+                    Icon(Icons.Default.Download, null); Spacer(Modifier.width(8.dp)); Text("Import Backup (.json)")
                 }
-
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.tertiaryContainer
-                    )
-                ) {
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)) {
                     Row(Modifier.padding(10.dp)) {
-                        Icon(
-                            Icons.Default.Warning, null,
-                            Modifier.size(16.dp),
-                            tint = MaterialTheme.colorScheme.tertiary,
-                        )
+                        Icon(Icons.Default.Warning, null, Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.tertiary)
                         Spacer(Modifier.width(6.dp))
                         Text(
-                            "Cookie restore works best on the same device & IP. Login may need to be redone on different devices.",
+                            "Cookie restore works best on the same device & IP.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onTertiaryContainer,
                         )
@@ -1361,9 +1398,7 @@ private fun SettingsDialog(
                 }
             }
         },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Close") }
-        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
     )
 }
 
@@ -1374,8 +1409,10 @@ private fun SettingsDialog(
 @Composable
 private fun BrowserScreen(
     session: SessionMeta,
+    multiProfileSupported: Boolean,
     onBack: () -> Unit,
     onCreateAnother: () -> Unit,
+    onCUserDetected: (String) -> Unit,
 ) {
     val context = LocalContext.current
     var rootRef by remember { mutableStateOf<FrameLayout?>(null) }
@@ -1389,10 +1426,6 @@ private fun BrowserScreen(
     var isLoading by remember { mutableStateOf(true) }
     var errorMsg by remember { mutableStateOf<String?>(null) }
     var pageTitle by remember { mutableStateOf("Facebook") }
-
-    val multiProfileSupported = remember {
-        WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)
-    }
 
     fun profileStore() = ProfileStore.getInstance()
 
@@ -1438,13 +1471,19 @@ private fun BrowserScreen(
         }
     }
 
-    fun flushProfileCookies() {
+    fun flushAndDetectCUser() {
         if (multiProfileSupported) {
             runCatching {
                 profileStore().getProfile(session.profileName)?.cookieManager?.flush()
             }
         } else {
             CookieManager.getInstance().flush()
+        }
+        // Detect c_user and cache it
+        val cookies = collectCookiesForSession(session, multiProfileSupported)
+        val cUser = cookies["c_user"]
+        if (!cUser.isNullOrBlank() && cUser != session.cachedCUser) {
+            onCUserDetected(cUser)
         }
     }
 
@@ -1457,7 +1496,7 @@ private fun BrowserScreen(
         override fun onPageFinished(view: WebView, url: String) {
             currentUrl = url; urlBarText = url; isLoading = false
             canBack = view.canGoBack(); canForward = view.canGoForward()
-            flushProfileCookies()
+            flushAndDetectCUser()
         }
         override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
             if (request.isForMainFrame) {
@@ -1490,11 +1529,9 @@ private fun BrowserScreen(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
             )
             activeWebView?.visibility = android.view.View.GONE
-            root.addView(child)
-            activeWebView = child
+            root.addView(child); activeWebView = child
             val transport = resultMsg.obj as? WebView.WebViewTransport ?: return false
-            transport.webView = child
-            resultMsg.sendToTarget()
+            transport.webView = child; resultMsg.sendToTarget()
             return true
         }
     }
@@ -1514,8 +1551,7 @@ private fun BrowserScreen(
         val root = rootRef ?: return false
         val current = activeWebView ?: return false
         if (root.childCount <= 1) return false
-        root.removeView(current)
-        current.stopLoading(); current.destroy()
+        root.removeView(current); current.stopLoading(); current.destroy()
         val parent = root.getChildAt(root.childCount - 1) as? WebView
         parent?.let {
             it.visibility = android.view.View.VISIBLE; activeWebView = it
@@ -1532,7 +1568,7 @@ private fun BrowserScreen(
                 TopAppBar(
                     navigationIcon = {
                         IconButton(onClick = {
-                            if (!closePopupIfPossible()) { flushProfileCookies(); onBack() }
+                            if (!closePopupIfPossible()) { flushAndDetectCUser(); onBack() }
                         }) { Icon(Icons.Default.ArrowBack, "Close") }
                     },
                     title = {
@@ -1580,22 +1616,15 @@ private fun BrowserScreen(
                                 leadingIcon = { Icon(Icons.Default.ContentCopy, null) },
                                 onClick = {
                                     showMenu = false
-                                    flushProfileCookies()
-                                    copySessionCookiesAsJson(
-                                        context = context,
-                                        session = session,
-                                        currentUrl = currentUrl,
-                                        pageTitle = pageTitle,
+                                    flushAndDetectCUser()
+                                    copySingleSessionCookies(
+                                        context, session, multiProfileSupported, currentUrl, pageTitle
                                     )
                                 }
                             )
                             DropdownMenuItem(
                                 text = { Text("Close") },
-                                onClick = {
-                                    showMenu = false
-                                    flushProfileCookies()
-                                    onBack()
-                                }
+                                onClick = { showMenu = false; flushAndDetectCUser(); onBack() }
                             )
                         }
                     }
@@ -1634,7 +1663,10 @@ private fun BrowserScreen(
                 onRelease = { root ->
                     for (i in root.childCount - 1 downTo 0) {
                         (root.getChildAt(i) as? WebView)?.let { web ->
-                            runCatching { web.stopLoading(); web.loadUrl("about:blank"); web.removeAllViews(); web.destroy() }
+                            runCatching {
+                                web.stopLoading(); web.loadUrl("about:blank")
+                                web.removeAllViews(); web.destroy()
+                            }
                         }
                     }
                     root.removeAllViews(); activeWebView = null; rootRef = null
