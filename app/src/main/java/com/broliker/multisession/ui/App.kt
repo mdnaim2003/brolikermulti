@@ -134,8 +134,6 @@ private fun exportCookiesForProfile(
             }.getOrNull()
         } else null
 
-        // CookieManager.getCookie returns all cookies for a URL as a header string.
-        // We collect for known Facebook domains.
         val domains = listOf(
             "https://m.facebook.com",
             "https://www.facebook.com",
@@ -145,9 +143,7 @@ private fun exportCookiesForProfile(
         val cookieMap = JSONObject()
         domains.forEach { domain ->
             val raw = if (mgr != null) {
-                // profile-scoped cookie manager doesn't expose getCookie directly;
-                // fall back to global for now
-                CookieManager.getInstance().getCookie(domain)
+                mgr.getCookie(domain)
             } else {
                 CookieManager.getInstance().getCookie(domain)
             }
@@ -170,7 +166,6 @@ private fun importCookiesForProfile(
         val obj = JSONObject(cookieJson)
         obj.keys().forEach { domain ->
             val cookieHeader = obj.getString(domain)
-            // Each cookie is separated by "; " in the header string.
             cookieHeader.split(";").forEach { part ->
                 val trimmed = part.trim()
                 if (trimmed.isNotEmpty()) {
@@ -229,7 +224,6 @@ private fun parseImportJson(
             archived = o.optBoolean("archived", false),
         )
         result.add(meta)
-        // Restore cookies
         val cookiesStr = o.optString("cookies", "{}")
         if (cookiesStr.isNotBlank() && cookiesStr != "{}") {
             importCookiesForProfile(meta.profileName, cookiesStr, multiProfileSupported)
@@ -238,7 +232,7 @@ private fun parseImportJson(
     return result
 }
 
-// ─── Cookie Copy Function ───────────────────────────────────────────────────
+// ─── Cookie Copy Function (UPDATED - Multi-Profile Support) ────────────────
 
 private fun copySessionCookiesAsJson(
     context: Context,
@@ -247,43 +241,40 @@ private fun copySessionCookiesAsJson(
     pageTitle: String,
 ) {
     try {
-        val cookieManager = CookieManager.getInstance()
+        val multiProfileSupported = WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)
 
-        // Facebook-এর সব known domain থেকে cookie collect করো
+        // ── Step 1: সঠিক CookieManager বের করো ──────────────────────
+        // Profile-scoped manager আগে try করো, না পেলে global fallback
+        val profileCookieMgr = if (multiProfileSupported) {
+            runCatching {
+                ProfileStore.getInstance().getProfile(session.profileName)?.cookieManager
+            }.getOrNull()
+        } else null
+
+        val globalMgr = CookieManager.getInstance()
+
+        // ── Step 2: সব relevant domain থেকে cookie collect করো ──────
         val domains = listOf(
             "https://m.facebook.com",
             "https://www.facebook.com",
             "https://facebook.com",
             "https://static.xx.fbcdn.net",
+            "https://m.facebook.com/",
+            "https://www.facebook.com/",
         )
+
+        // currentUrl আলাদাভাবে যোগ করো
+        val allDomains = (domains + listOf(currentUrl))
+            .filter { it.isNotBlank() }
+            .distinct()
 
         val cookieJson = JSONObject()
 
-        domains.forEach { domain ->
-            val raw = cookieManager.getCookie(domain)
-            if (!raw.isNullOrBlank()) {
-                // "key=value; key2=value2" format কে JSON object এ convert করো
-                val domainObj = JSONObject()
-                raw.split(";").forEach { part ->
-                    val trimmed = part.trim()
-                    val eqIndex = trimmed.indexOf('=')
-                    if (eqIndex > 0) {
-                        val key = trimmed.substring(0, eqIndex).trim()
-                        val value = trimmed.substring(eqIndex + 1).trim()
-                        if (key.isNotEmpty()) {
-                            domainObj.put(key, value)
-                        }
-                    }
-                }
-                if (domainObj.length() > 0) {
-                    cookieJson.put(domain, domainObj)
-                }
-            }
-        }
+        allDomains.forEach { domain ->
+            // Profile manager থেকে আগে try, তারপর global
+            val raw = profileCookieMgr?.getCookie(domain)
+                ?: globalMgr.getCookie(domain)
 
-        // বর্তমান URL-এর cookie-ও নাও (Facebook internal URLs)
-        if (currentUrl.isNotBlank() && !domains.any { currentUrl.startsWith(it) }) {
-            val raw = cookieManager.getCookie(currentUrl)
             if (!raw.isNullOrBlank()) {
                 val domainObj = JSONObject()
                 raw.split(";").forEach { part ->
@@ -295,15 +286,44 @@ private fun copySessionCookiesAsJson(
                         if (key.isNotEmpty()) {
                             domainObj.put(key, value)
                         }
+                    } else if (trimmed.isNotEmpty() && eqIndex < 0) {
+                        // value-less cookie flag (e.g. HttpOnly)
+                        domainObj.put(trimmed, "")
                     }
                 }
                 if (domainObj.length() > 0) {
-                    cookieJson.put(currentUrl, domainObj)
+                    // Domain key হিসেবে clean URL রাখো
+                    val cleanDomain = domain.trimEnd('/')
+                    // আগে থেকে same domain-এর data থাকলে merge করো
+                    if (cookieJson.has(cleanDomain)) {
+                        val existing = cookieJson.getJSONObject(cleanDomain)
+                        domainObj.keys().forEach { k -> existing.put(k, domainObj.getString(k)) }
+                    } else {
+                        cookieJson.put(cleanDomain, domainObj)
+                    }
                 }
             }
         }
 
-        // Final output JSON
+        // ── Step 3: key count গণনা করো ──────────────────────────────
+        var totalKeys = 0
+        cookieJson.keys().forEach { domain ->
+            totalKeys += cookieJson.getJSONObject(domain).length()
+        }
+
+        // ── Step 4: Final JSON তৈরি করো ─────────────────────────────
+        // Facebook login-এর জন্য সবচেয়ে গুরুত্বপূর্ণ keys highlight করো
+        val importantKeys = listOf("c_user", "xs", "datr", "fr", "sb", "presence")
+        val foundImportant = mutableListOf<String>()
+        cookieJson.keys().forEach { domain ->
+            val obj = cookieJson.getJSONObject(domain)
+            importantKeys.forEach { key ->
+                if (obj.has(key) && !foundImportant.contains(key)) {
+                    foundImportant.add(key)
+                }
+            }
+        }
+
         val output = JSONObject().apply {
             put("app", "Bro Liker")
             put("session_id", session.id)
@@ -313,36 +333,46 @@ private fun copySessionCookiesAsJson(
             put("current_url", currentUrl)
             put("page_title", pageTitle)
             put("exported_at", System.currentTimeMillis())
+            put("multi_profile_supported", multiProfileSupported)
+            put("important_keys_found", JSONArray(foundImportant))
             put("cookies", cookieJson)
         }
 
         val jsonString = output.toString(2)
 
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(
-            ClipData.newPlainText("BroLiker Cookies", jsonString)
-        )
+        clipboard.setPrimaryClip(ClipData.newPlainText("BroLiker Cookies", jsonString))
 
-        // কতটা key copy হলো সেটা count করো
-        var totalKeys = 0
-        domains.forEach { domain ->
-            if (cookieJson.has(domain)) {
-                totalKeys += cookieJson.getJSONObject(domain).length()
+        // ── Step 5: User-friendly toast ──────────────────────────────
+        when {
+            totalKeys > 0 && foundImportant.contains("c_user") -> {
+                Toast.makeText(
+                    context,
+                    "✅ $totalKeys cookies copied! Login keys found: ${foundImportant.joinToString(", ")}",
+                    Toast.LENGTH_LONG,
+                ).show()
             }
-        }
-
-        if (totalKeys > 0) {
-            Toast.makeText(
-                context,
-                "✅ $totalKeys cookie keys copied! (${session.name})",
-                Toast.LENGTH_SHORT,
-            ).show()
-        } else {
-            Toast.makeText(
-                context,
-                "⚠️ No cookies found. Login first then try again.",
-                Toast.LENGTH_LONG,
-            ).show()
+            totalKeys > 0 -> {
+                Toast.makeText(
+                    context,
+                    "⚠️ $totalKeys cookies copied but login keys (c_user, xs) not found. Try after full login.",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+            else -> {
+                // ── Debug info দেখাও যদি কিছু না পাওয়া যায় ──────────
+                val debugInfo = buildString {
+                    append("Profile supported: $multiProfileSupported\n")
+                    append("Profile name: ${session.profileName}\n")
+                    append("Profile manager: ${if (profileCookieMgr != null) "Found" else "NULL"}\n")
+                    append("Global test (m.fb): ${globalMgr.getCookie("https://m.facebook.com")?.take(30) ?: "null"}")
+                }
+                Toast.makeText(
+                    context,
+                    "❌ No cookies found.\n$debugInfo",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
         }
 
     } catch (e: Exception) {
@@ -404,7 +434,6 @@ fun BroLikerApp() {
                 inp.bufferedReader().readText()
             } ?: return@rememberLauncherForActivityResult
             val imported = parseImportJson(json, multiProfileSupported)
-            // Merge: keep existing, add new (by id)
             val existingIds = sessions.map { it.id }.toSet()
             val newOnes = imported.filter { it.id !in existingIds }
             val merged = sessions + newOnes
@@ -488,15 +517,12 @@ fun BroLikerApp() {
                     }
                 },
                 actions = {
-                    // Settings
                     IconButton(onClick = { showSettings = true }) {
                         Icon(Icons.Default.Settings, contentDescription = "Settings")
                     }
-                    // Group manager
                     IconButton(onClick = { showGroupManager = true }) {
                         Icon(Icons.Default.AccountTree, contentDescription = "Groups")
                     }
-                    // More menu
                     var showMore by remember { mutableStateOf(false) }
                     IconButton(onClick = { showMore = true }) {
                         Icon(Icons.Default.MoreVert, contentDescription = "More")
@@ -575,7 +601,7 @@ fun BroLikerApp() {
 
             Spacer(Modifier.height(10.dp))
 
-            // ── Group filter chips (scrollable row) ────────────────────
+            // ── Group filter chips ────────────────────────────────────
             LazyRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 contentPadding = PaddingValues(vertical = 4.dp),
@@ -601,7 +627,7 @@ fun BroLikerApp() {
 
             Spacer(Modifier.height(8.dp))
 
-            // ── Selection bar (if any selected) ───────────────────────
+            // ── Selection bar ──────────────────────────────────────────
             if (selectedIds.isNotEmpty()) {
                 Card(
                     colors = CardDefaults.cardColors(
@@ -825,7 +851,6 @@ private fun PaginationBar(
                 Icon(Icons.Default.ChevronLeft, "Previous page")
             }
 
-            // Page numbers (show up to 5 around current)
             val range = ((current - 2).coerceAtLeast(0)..(current + 2).coerceAtMost(total - 1))
             if (range.first > 0) {
                 PageChip(0, current, onPage)
@@ -1081,7 +1106,7 @@ private fun RenameDialog(current: String, onDismiss: () -> Unit, onSave: (String
     )
 }
 
-// ─── Group Manager Dialog (improved) ─────────────────────────────────────────
+// ─── Group Manager Dialog ────────────────────────────────────────────────────
 
 @Composable
 private fun GroupManagerDialog(
@@ -1107,7 +1132,6 @@ private fun GroupManagerDialog(
         },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                // All sessions row
                 GroupRow(
                     name = "All Sessions",
                     count = sessions.count { !it.archived },
