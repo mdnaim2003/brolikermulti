@@ -1,9 +1,14 @@
-# Local/release signing material
+# Android / Gradle
+.gradle/
+build/
+*/build/
+local.properties
+
+# Release signing secrets - NEVER commit these
 release-key.jks
 keystore-base64.txt
 *.jks
 
-# Gradle/build outputs
-.gradle/
-build/
-app/build/
+# IDE
+.idea/
+*.iml

@@ -14,7 +14,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: '17'
           distribution: 'temurin'
@@ -25,30 +25,80 @@ jobs:
       - name: Restore release keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        shell: bash
         run: |
-          if [ -z "$KEYSTORE_BASE64" ]; then
+          set -euo pipefail
+          if [ -z "${KEYSTORE_BASE64:-}" ]; then
             echo "KEYSTORE_BASE64 GitHub Secret is missing."
             exit 1
           fi
-          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > release-key.jks
+
+          export KEYSTORE_BASE64
+          python3 - <<'PY'
+          import base64
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          raw = os.environ.get("KEYSTORE_BASE64", "")
+          # Accept either pure Base64 or the Windows certutil -encode format
+          # containing BEGIN/END CERTIFICATE wrapper lines and whitespace.
+          cleaned = re.sub(r"-----BEGIN CERTIFICATE-----", "", raw, flags=re.IGNORECASE)
+          cleaned = re.sub(r"-----END CERTIFICATE-----", "", cleaned, flags=re.IGNORECASE)
+          cleaned = re.sub(r"\s+", "", cleaned)
+
+          try:
+              data = base64.b64decode(cleaned, validate=True)
+          except Exception as exc:
+              print(f"KEYSTORE_BASE64 is not valid Base64: {exc}")
+              sys.exit(1)
+
+          if not data:
+              print("Decoded keystore is empty.")
+              sys.exit(1)
+
+          Path("release-key.jks").write_bytes(data)
+          print(f"Release keystore restored ({len(data)} bytes).")
+          PY
+
           test -s release-key.jks
+
+      - name: Set release version code
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION_CODE=$((1000 + GITHUB_RUN_NUMBER))
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          echo "Building versionCode=$VERSION_CODE"
+
+      - name: Validate release signing secrets
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${KEYSTORE_PASSWORD:-}" ] || { echo "KEYSTORE_PASSWORD is missing."; exit 1; }
+          [ -n "${KEY_ALIAS:-}" ] || { echo "KEY_ALIAS is missing."; exit 1; }
+          [ -n "${KEY_PASSWORD:-}" ] || { echo "KEY_PASSWORD is missing."; exit 1; }
+          echo "Signing secrets are present."
 
       - name: Build signed release APK
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: |
-          VERSION_CODE=$((1000 + GITHUB_RUN_NUMBER))
-          export VERSION_CODE
-          echo "Building release with versionCode=$VERSION_CODE"
-          ./gradlew assembleRelease --no-daemon --stacktrace
+          VERSION_CODE: ${{ env.VERSION_CODE }}
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
 
       - name: Upload release APK
         uses: actions/upload-artifact@v4
         with:
           name: bro-liker-release-apk
           path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
           retention-days: 30
 
       - name: Clean release keystore

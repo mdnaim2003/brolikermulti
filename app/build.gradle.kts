@@ -4,6 +4,11 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val releaseStorePassword = System.getenv("KEYSTORE_PASSWORD") ?: ""
+val releaseKeyAlias = System.getenv("KEY_ALIAS") ?: ""
+val releaseKeyPassword = System.getenv("KEY_PASSWORD") ?: ""
+val ciVersionCode = System.getenv("VERSION_CODE")?.toIntOrNull()
+
 android {
     namespace = "com.broliker.multisession"
     compileSdk = 35
@@ -12,19 +17,16 @@ android {
         applicationId = "com.broliker.multisession"
         minSdk = 24
         targetSdk = 35
-        // For GitHub Actions release builds, VERSION_CODE is supplied by the workflow.
-        // Local/debug builds continue to use this safe fallback.
-        versionCode = (System.getenv("VERSION_CODE") ?: "5").toInt()
+        versionCode = ciVersionCode ?: 5
         versionName = "5.0.0"
     }
 
     signingConfigs {
         create("release") {
-            val keystoreFile = rootProject.file("release-key.jks")
-            storeFile = keystoreFile
-            storePassword = System.getenv("KEYSTORE_PASSWORD")
-            keyAlias = System.getenv("KEY_ALIAS")
-            keyPassword = System.getenv("KEY_PASSWORD")
+            storeFile = rootProject.file("release-key.jks")
+            storePassword = releaseStorePassword
+            keyAlias = releaseKeyAlias
+            keyPassword = releaseKeyPassword
         }
     }
 
